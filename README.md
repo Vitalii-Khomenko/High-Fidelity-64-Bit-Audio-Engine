@@ -34,3 +34,4 @@ The entire audio stack is fully mapped from the Kotlin Jetpack Compose UI all th
 
 ## ⚙️ Building the UI
 Open the folder in Android Studio. Gradle will automatically pull Jetpack Compose and Google Oboe framework dependencies. CMake will compile the NDK native C++ libraries.
+./gradlew assembleDebug

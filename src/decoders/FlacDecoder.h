@@ -25,7 +25,7 @@ public:
         return pFlac != nullptr;
     }
 
-    bool openFd(int fd) {
+    bool openFd(int fd) override {
         m_fd = dup(fd); // duplicate FD to own its lifecycle
         pFlac = drflac_open(onRead, onSeek, onTell, &m_fd, nullptr);
         if (!pFlac) {

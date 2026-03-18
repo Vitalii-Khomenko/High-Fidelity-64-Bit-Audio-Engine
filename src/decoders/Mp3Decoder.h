@@ -23,9 +23,9 @@ public:
         return m_initialized;
     }
 
-    bool openFd(int fd) {
+    bool openFd(int fd) override {
         m_fd = dup(fd);
-        m_initialized = drmp3_init(&mp3Frame, onRead, onSeek, &m_fd, nullptr);
+        m_initialized = drmp3_init(&mp3Frame, onRead, onSeek, onTell, nullptr, &m_fd, nullptr);
         if (!m_initialized) {
             close(m_fd);
             m_fd = -1;
@@ -57,7 +57,7 @@ public:
     uint64_t getTotalFrames() const override { return m_initialized ? drmp3_get_pcm_frame_count(&mp3Frame) : 0; }
 
 private:
-    drmp3 mp3Frame;
+    mutable drmp3 mp3Frame;
     bool m_initialized = false;
     int m_fd;
 
@@ -70,9 +70,18 @@ private:
     static drmp3_bool32 onSeek(void* pUserData, int offset, drmp3_seek_origin origin) {
         int fd = *static_cast<int*>(pUserData);
         int whence = SEEK_SET;
-        if (origin == drmp3_seek_origin_current) whence = SEEK_CUR;
+        if (origin == DRMP3_SEEK_CUR) whence = SEEK_CUR;
+        if (origin == DRMP3_SEEK_END) whence = SEEK_END;
         
         off_t newPos = lseek(fd, offset, whence);
         return newPos >= 0 ? DRMP3_TRUE : DRMP3_FALSE;
+    }
+
+    static drmp3_bool32 onTell(void* pUserData, drmp3_int64* pCursor) {
+        int fd = *static_cast<int*>(pUserData);
+        off_t current = lseek(fd, 0, SEEK_CUR);
+        if (current < 0) return DRMP3_FALSE;
+        *pCursor = static_cast<drmp3_int64>(current);
+        return DRMP3_TRUE;
     }
 };

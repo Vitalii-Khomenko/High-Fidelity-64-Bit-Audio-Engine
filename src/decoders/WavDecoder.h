@@ -23,9 +23,9 @@ public:
         return m_initialized;
     }
 
-    bool openFd(int fd) {
+    bool openFd(int fd) override {
         m_fd = dup(fd);
-        m_initialized = drwav_init(&wavFrame, onRead, onSeek, &m_fd, nullptr);
+        m_initialized = drwav_init(&wavFrame, onRead, onSeek, onTell, &m_fd, nullptr);
         if (!m_initialized) {
             close(m_fd);
             m_fd = -1;
@@ -70,9 +70,18 @@ private:
     static drwav_bool32 onSeek(void* pUserData, int offset, drwav_seek_origin origin) {
         int fd = *static_cast<int*>(pUserData);
         int whence = SEEK_SET;
-        if (origin == drwav_seek_origin_current) whence = SEEK_CUR;
+        if (origin == DRWAV_SEEK_CUR) whence = SEEK_CUR;
+        if (origin == DRWAV_SEEK_END) whence = SEEK_END;
         
         off_t newPos = lseek(fd, offset, whence);
         return newPos >= 0 ? DRWAV_TRUE : DRWAV_FALSE;
+    }
+
+    static drwav_bool32 onTell(void* pUserData, drwav_int64* pCursor) {
+        int fd = *static_cast<int*>(pUserData);
+        off_t current = lseek(fd, 0, SEEK_CUR);
+        if (current < 0) return DRWAV_FALSE;
+        *pCursor = static_cast<drwav_int64>(current);
+        return DRWAV_TRUE;
     }
 };
