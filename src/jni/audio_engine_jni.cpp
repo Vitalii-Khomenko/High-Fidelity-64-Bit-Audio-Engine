@@ -4,6 +4,8 @@
 #include <iostream>
 #include "../core/AudioPlayer.h"
 #include "../decoders/FlacDecoder.h"
+#include "../decoders/Mp3Decoder.h"
+#include "../decoders/WavDecoder.h"
 
 // Singleton for Prototype Engine
 static std::unique_ptr<audio_engine::core::AudioPlayer> g_player;
@@ -33,11 +35,26 @@ Java_com_aiproject_musicplayer_AudioEngine_loadFileFd(JNIEnv* env, jobject /* th
     g_player->stop();
     
     // Convert OS File Descriptor to /proc/self/fd/ path
-    // This allows C++ open() / fopen() to read the file transparently without strict permissions.
     std::string fdPath = "/proc/self/fd/" + std::to_string(fd);
     
-    // Initialize decoder
-    auto decoder = std::make_unique<FlacDecoder>(); // Using FLAC decode as default 
+    std::unique_ptr<audio_engine::decoders::IAudioDecoder> decoder;
+    
+    // Try FLAC
+    decoder = std::make_unique<FlacDecoder>();
+    if (decoder->open(fdPath)) {
+        g_player->setDecoder(std::move(decoder));
+        return JNI_TRUE;
+    }
+    
+    // Try MP3
+    decoder = std::make_unique<Mp3Decoder>();
+    if (decoder->open(fdPath)) {
+        g_player->setDecoder(std::move(decoder));
+        return JNI_TRUE;
+    }
+
+    // Try WAV
+    decoder = std::make_unique<WavDecoder>();
     if (decoder->open(fdPath)) {
         g_player->setDecoder(std::move(decoder));
         return JNI_TRUE;

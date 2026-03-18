@@ -1,8 +1,10 @@
 package com.aiproject.musicplayer
 
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
+import android.provider.DocumentsContract
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -37,13 +39,74 @@ class MainActivity : ComponentActivity() {
                 var playlist by remember { mutableStateOf(listOf<AudioTrack>()) }
                 var currentTrack by remember { mutableStateOf<AudioTrack?>(null) }
 
-                val filePickerLauncher = rememberLauncherForActivityResult(
-                    contract = ActivityResultContracts.OpenMultipleDocuments()
-                ) { uris ->
-                    val newTracks = uris.map { uri ->
-                        AudioTrack(uri, getFileName(uri))
+                // Load persisted files on startup
+                LaunchedEffect(Unit) {
+                    val persistedUris = contentResolver.persistedUriPermissions
+                    val loadedTracks = mutableListOf<AudioTrack>()
+                    for (permission in persistedUris) {
+                        try {
+                            if (permission.uri.toString().contains("tree")) {
+                                val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+                                    permission.uri,
+                                    DocumentsContract.getTreeDocumentId(permission.uri)
+                                )
+                                contentResolver.query(childrenUri, arrayOf(
+                                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                                    DocumentsContract.Document.COLUMN_MIME_TYPE
+                                ), null, null, null)?.use { cursor ->
+                                    while (cursor.moveToNext()) {
+                                        val mimeString = cursor.getString(2) ?: ""
+                                        if (mimeString.startsWith("audio/")) {
+                                            val docId = cursor.getString(0)
+                                            val name = cursor.getString(1)
+                                            val docUri = DocumentsContract.buildDocumentUriUsingTree(permission.uri, docId)
+                                            loadedTracks.add(AudioTrack(docUri, name))
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
                     }
-                    playlist = playlist + newTracks
+                    if (loadedTracks.isNotEmpty()) {
+                        playlist = loadedTracks
+                    }
+                }
+
+                val folderPickerLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.OpenDocumentTree()
+                ) { uri ->
+                    if (uri != null) {
+                        // Persist permissions
+                        contentResolver.takePersistableUriPermission(
+                            uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                        )
+
+                        val newTracks = mutableListOf<AudioTrack>()
+                        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+                            uri,
+                            DocumentsContract.getTreeDocumentId(uri)
+                        )
+                        contentResolver.query(childrenUri, arrayOf(
+                            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                            DocumentsContract.Document.COLUMN_MIME_TYPE
+                        ), null, null, null)?.use { cursor ->
+                            while (cursor.moveToNext()) {
+                                val mimeString = cursor.getString(2) ?: ""
+                                if (mimeString.startsWith("audio/")) {
+                                    val docId = cursor.getString(0)
+                                    val name = cursor.getString(1)
+                                    val docUri = DocumentsContract.buildDocumentUriUsingTree(uri, docId)
+                                    newTracks.add(AudioTrack(docUri, name))
+                                }
+                            }
+                        }
+                        playlist = newTracks
+                    }
                 }
 
                 Scaffold(
@@ -51,8 +114,8 @@ class MainActivity : ComponentActivity() {
                         TopAppBar(
                             title = { Text("MusicPlayerPro (64-bit Core)") },
                             actions = {
-                                IconButton(onClick = { filePickerLauncher.launch(arrayOf("audio/*", "application/octet-stream")) }) {
-                                    Icon(Icons.Filled.Add, contentDescription = "Add Tracks")
+                                IconButton(onClick = { folderPickerLauncher.launch(null) }) {
+                                    Icon(Icons.Filled.Add, contentDescription = "Add Folder")
                                 }
                             }
                         )
