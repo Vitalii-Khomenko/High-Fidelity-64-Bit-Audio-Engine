@@ -70,6 +70,60 @@ A professional-grade music player for Android built on a fully custom 64-bit C++
 
 ---
 
+## Building
+
+### Prerequisites
+- Android Studio Hedgehog or later **or** command-line tools only
+- Android NDK r25c+ (install via SDK Manager or `sdkmanager "ndk;25.2.9519653"`)
+- Java 17+
+
+### Clone
+```bash
+git clone https://github.com/Vitalii-Khomenko/High-Fidelity-64-Bit-Audio-Engine.git
+cd High-Fidelity-64-Bit-Audio-Engine
+```
+
+### Debug APK (development / sideload)
+```bash
+./gradlew assembleDebug
+# Output: app/build/outputs/apk/debug/app-debug.apk
+```
+
+### Release APK (signed, for distribution)
+```bash
+# 1. Create a keystore (one-time)
+keytool -genkeypair -v -keystore hifi-player.jks -alias hifi -keyalg RSA -keysize 2048 -validity 10000
+
+# 2. Add signing config to local.properties (never commit this file)
+echo "KEYSTORE_FILE=../hifi-player.jks"   >> local.properties
+echo "KEYSTORE_PASSWORD=your_password"    >> local.properties
+echo "KEY_ALIAS=hifi"                     >> local.properties
+echo "KEY_PASSWORD=your_password"         >> local.properties
+
+# 3. Build
+./gradlew assembleRelease
+# Output: app/build/outputs/apk/release/app-release.apk
+```
+
+### Install directly to a connected device / emulator
+```bash
+./gradlew installDebug
+# or with adb:
+adb install app/build/outputs/apk/debug/app-debug.apk
+```
+
+### Clean build
+```bash
+./gradlew clean assembleDebug
+```
+
+### Build on Windows (Command Prompt / PowerShell)
+```bat
+gradlew.bat assembleDebug
+```
+
+---
+
 ## Technical Notes
 
 ### MP3 VBR Fix

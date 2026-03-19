@@ -7,7 +7,9 @@
       "Bash(jar tf:*)",
       "Bash(jar xf:*)",
       "Bash(unzip -p media-1.6.0.aar classes.jar)",
-      "Bash(unzip -p classes.jar)"
+      "Bash(unzip -p classes.jar)",
+      "Bash(xxd \"c:/Install/AI Research/MusicPlayerPro/app/src/main/res/values/strings.xml\")",
+      "Bash(printf '<?xml version=\"\"\"\"1.0\"\"\"\" encoding=\"\"\"\"utf-8\"\"\"\"?>\\\\n<resources>\\\\n    <string name=\"\"\"\"app_name\"\"\"\">HiFi Player</string>\\\\n</resources>\\\\n' printf '<?xml version=\"\"\"\"1.0\"\"\"\" encoding=\"\"\"\"utf-8\"\"\"\"?>\\\\n<resources>\\\\n    <style name=\"\"\"\"Theme.MusicPlayerPro\"\"\"\" parent=\"\"\"\"android:Theme.Material.Light.NoActionBar\"\"\"\" />\\\\n</resources>\\\\n' xxd 'c:/Install/AI Research/MusicPlayerPro/app/src/main/res/values/strings.xml')"
     ]
   }
 }
