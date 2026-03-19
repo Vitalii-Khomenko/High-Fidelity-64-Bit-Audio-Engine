@@ -89,21 +89,24 @@ cd High-Fidelity-64-Bit-Audio-Engine
 # Output: app/build/outputs/apk/debug/app-debug.apk
 ```
 
-### Release APK (signed, for distribution)
+### Release APK (signed, optimized)
+The project ships with a ready-made keystore (`hifi-player.jks`). Signing credentials are stored in `local.properties` (never committed to git).
+
 ```bash
-# 1. Create a keystore (one-time)
-keytool -genkeypair -v -keystore hifi-player.jks -alias hifi -keyalg RSA -keysize 2048 -validity 10000
-
-# 2. Add signing config to local.properties (never commit this file)
-echo "KEYSTORE_FILE=../hifi-player.jks"   >> local.properties
-echo "KEYSTORE_PASSWORD=your_password"    >> local.properties
-echo "KEY_ALIAS=hifi"                     >> local.properties
-echo "KEY_PASSWORD=your_password"         >> local.properties
-
-# 3. Build
 ./gradlew assembleRelease
-# Output: app/build/outputs/apk/release/app-release.apk
+# Output: app/build/outputs/apk/release/app-release.apk  (~17 MB)
 ```
+
+To generate a **new** keystore (e.g. for your own distribution):
+```bash
+keytool -genkeypair -v \
+  -keystore hifi-player.jks \
+  -alias hifi \
+  -keyalg RSA -keysize 2048 -validity 10000 \
+  -storepass YOUR_PASSWORD -keypass YOUR_PASSWORD \
+  -dname "CN=Your Name, O=YourOrg, C=UA"
+```
+Then update the four `KEYSTORE_*` lines in `local.properties`.
 
 ### Install directly to a connected device / emulator
 ```bash
