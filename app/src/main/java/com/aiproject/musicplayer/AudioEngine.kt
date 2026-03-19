@@ -11,7 +11,6 @@ class AudioEngine {
         }
     }
 
-    // Native methods
     external fun initEngine()
     external fun setVolume(volume: Double)
     external fun setEqEnabled(enabled: Boolean)
@@ -20,10 +19,9 @@ class AudioEngine {
 
     fun playTrack(uri: Uri, context: Context) {
         try {
-            // Android 10+ Scoped Storage requires File Descriptors, not string paths
             val pfd = context.contentResolver.openFileDescriptor(uri, "r")
             val fd = pfd?.detachFd() ?: -1
-            
+
             if (fd != -1) {
                 if (loadFileFd(fd)) {
                     play()
@@ -36,7 +34,7 @@ class AudioEngine {
 
     external fun play()
     external fun pause()
-
-    // Seek natively with precise PCM frame alignment
     external fun seekTo(positionMs: Double)
+    external fun getDurationMs(): Double
+    external fun getPositionMs(): Double
 }

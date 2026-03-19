@@ -6,6 +6,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
@@ -25,7 +26,6 @@ class PlaybackService : Service() {
     private lateinit var audioEngine: AudioEngine
     private var audioFocusRequest: AudioFocusRequest? = null
 
-    // Fix for the getEngine issue
     fun getEngine(): AudioEngine = audioEngine
 
     inner class LocalBinder : Binder() {
@@ -36,11 +36,12 @@ class PlaybackService : Service() {
         super.onCreate()
         audioEngine = AudioEngine()
         audioEngine.initEngine()
-        
+
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        
+
         setupMediaSession()
         createNotificationChannel()
+        showNotification("Ready")
     }
 
     private fun setupMediaSession() {
@@ -76,15 +77,24 @@ class PlaybackService : Service() {
     fun playTrack(uri: Uri, context: Context, title: String) {
         if (requestAudioFocus()) {
             audioEngine.playTrack(uri, context)
-            
+
             val metadata = MediaMetadataCompat.Builder()
                 .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
                 .build()
             mediaSession.setMetadata(metadata)
-            
+
             updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
             showNotification(title)
+        } else {
+            // Even without focus, attempt to play local explicitly if requested by user manually
+            audioEngine.playTrack(uri, context)
+            showNotification(title)
         }
+    }
+
+    fun setPlaybackSpeed(speed: Double) {
+        // We will call native method here once implemented
+        // audioEngine.setSpeed(speed)
     }
 
     private fun requestAudioFocus(): Boolean {
@@ -100,7 +110,7 @@ class PlaybackService : Service() {
                     when (focusChange) {
                         AudioManager.AUDIOFOCUS_LOSS -> mediaSession.controller.transportControls.pause()
                         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> mediaSession.controller.transportControls.pause()
-                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> audioEngine.setVolume(0.2) // Ducking
+                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> audioEngine.setVolume(0.2)
                         AudioManager.AUDIOFOCUS_GAIN -> {
                             audioEngine.setVolume(1.0)
                             mediaSession.controller.transportControls.play()
@@ -163,13 +173,17 @@ class PlaybackService : Service() {
         val pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Playing: ")
+            .setContentTitle(if (title == "Ready") "Player Ready" else "Playing: ")
             .setContentText("MusicPlayerPro 64-bit Engine")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentIntent(pendingIntent)
             .build()
 
-        startForeground(NOTIFICATION_ID, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     override fun onDestroy() {

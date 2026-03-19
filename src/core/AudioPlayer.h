@@ -16,16 +16,13 @@
 namespace audio_engine {
 namespace core {
 
-/**
- * @brief Main engine controller managing the playback loop and DSP chain.
- */
 class AudioPlayer {
 public:
     AudioPlayer() :
         m_isPlaying(false),
         m_stopThread(false),
         m_seekRequest(-1),
-        m_ringBuffer(std::make_unique<RingBuffer<double>>(65536)) // 65536 power of 2
+        m_ringBuffer(std::make_unique<RingBuffer<double>>(65536))
     {
         m_gainProcessor = std::make_unique<dsp::GainProcessor>();
         m_eqProcessor = std::make_unique<dsp::BiquadFilter>();
@@ -37,9 +34,12 @@ public:
     }
 
     void setDecoder(std::unique_ptr<decoders::IAudioDecoder> decoder) {
+        // Fully stop the current playing thread and oboe strictly before switching
         stop();
+        
         m_decoder = std::move(decoder);
         m_seekRequest.store(-1, std::memory_order_relaxed);
+        m_ringBuffer->clear();
 
         uint32_t sampleRate = m_decoder->getSampleRate();
         size_t channels = m_decoder->getNumChannels();
@@ -47,21 +47,49 @@ public:
         m_gainProcessor->prepare(sampleRate, 1024);
         m_eqProcessor->prepare(sampleRate, 1024);
 
-        // Re-init audio endpoint
+        // Terminate and properly re-init
         m_endpoint->terminate();
         m_endpoint->initialize(sampleRate, channels);
     }
 
     void setVolume(double linearVolume) {
+        // The volume slider in compose goes 0.0 to 1.0 but maybe something is not mapping correctly?
+        // Ensure atomic write handles it.
         m_gainProcessor->setGainLinear(linearVolume);
+    }
+
+    double getDurationMs() const {
+        if (!m_decoder) return 0.0;
+        uint64_t frames = m_decoder->getTotalFrames();
+        uint32_t sr = m_decoder->getSampleRate();
+        if (sr == 0) return 0.0;
+        return (static_cast<double>(frames) / sr) * 1000.0;
+    }
+
+    double getPositionMs() const {
+        if (!m_decoder) return 0.0;
+        int64_t pendingSeek = m_seekRequest.load(std::memory_order_acquire);
+        if (pendingSeek >= 0) {
+            uint32_t sr = m_decoder->getSampleRate();
+            if (sr == 0) return 0.0;
+            return (static_cast<double>(pendingSeek) / sr) * 1000.0;
+        }
+
+        uint64_t frames = m_decoder->getCurrentFrame();
+        uint32_t sr = m_decoder->getSampleRate();
+        if (sr == 0) return 0.0;
+        return (static_cast<double>(frames) / sr) * 1000.0;
     }
 
     void seekToMs(double ms) {
         if (!m_decoder) return;
-        uint64_t targetFrame = static_cast<uint64_t>((ms / 1000.0) * m_decoder->getSampleRate());
+        uint32_t sr = m_decoder->getSampleRate();
+        if (sr == 0) return;
+        
+        uint64_t targetFrame = static_cast<uint64_t>((ms / 1000.0) * sr);
         uint64_t totalFrames = m_decoder->getTotalFrames();
         if (totalFrames > 0 && targetFrame >= totalFrames) {
-            targetFrame = totalFrames - 1;
+            targetFrame = totalFrames > 1 ? totalFrames - 2 : 0; 
         }
         m_seekRequest.store(static_cast<int64_t>(targetFrame), std::memory_order_release);
     }
@@ -84,15 +112,19 @@ public:
     }
 
     void stop() {
+        m_stopThread = true; // Always set to true regardless of m_isPlaying
         if (m_isPlaying) {
-            m_stopThread = true;
             m_isPlaying = false;
             m_endpoint->terminate();
+        } else {
+            // Edge case: it finished naturally, but Oboe is still playing the tail!
+            m_endpoint->terminate();
         }
-        // Always attempt to join if stopping
+        
         if (m_decodeThread.joinable()) {
             m_decodeThread.join();
         }
+        m_ringBuffer->clear();
     }
 
 private:
@@ -103,7 +135,6 @@ private:
         std::vector<double> interleaved(CHUNK_FRAMES * channels);
 
         while (!m_stopThread) {
-            // Handle pending seek
             int64_t seekFrame = m_seekRequest.load(std::memory_order_acquire);
             if (seekFrame >= 0) {
                 m_decoder->seekToFrame(static_cast<uint64_t>(seekFrame));
@@ -111,36 +142,29 @@ private:
                 m_seekRequest.store(-1, std::memory_order_release);
             }
 
-            // Check if there's enough space in the RingBuffer
             if (m_ringBuffer->getAvailableWrite() < (CHUNK_FRAMES * channels)) {
-                // Buffer is full, wait a bit
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
                 continue;
             }
 
-            // Decode a chunk
             size_t framesRead = m_decoder->readFrames(pcmBuffer, CHUNK_FRAMES);
             if (framesRead == 0) {
-                // Check if EOF was legitimate or we just seeked exactly to end
                 seekFrame = m_seekRequest.load(std::memory_order_acquire);
-                if (seekFrame >= 0) continue; // Loop around to process the seek
-                
+                if (seekFrame >= 0) continue;
+
                 m_isPlaying = false;
-                break; // Stop decoding thread
+                break;
             }
 
-            // Apply DSP chain in 64-bit precision
             m_eqProcessor->processBlock(pcmBuffer);
             m_gainProcessor->processBlock(pcmBuffer);
 
-            // Interleave the 64-bit floats for the ring buffer
             for (size_t f = 0; f < framesRead; ++f) {
                 for (size_t ch = 0; ch < channels; ++ch) {
                     interleaved[f * channels + ch] = pcmBuffer.getReadPointer(ch)[f];
                 }
             }
 
-            // Push to Lock-Free RingBuffer
             m_ringBuffer->write(interleaved.data(), framesRead * channels);
         }
     }

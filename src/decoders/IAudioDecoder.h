@@ -15,13 +15,13 @@ public:
     virtual bool openFd(int fd) { return false; }
 
     virtual size_t readFrames(audio_engine::core::AudioBuffer& buffer, size_t framesToRead) = 0;
-    
-    // Seek to specific frame
+
     virtual bool seekToFrame(uint64_t targetFrame) = 0;
 
     virtual uint32_t getSampleRate() const = 0;
     virtual size_t getNumChannels() const = 0;
     virtual uint64_t getTotalFrames() const = 0;
+    virtual uint64_t getCurrentFrame() const = 0; // Added for correct seeking/progress
 };
 
 } // namespace decoders

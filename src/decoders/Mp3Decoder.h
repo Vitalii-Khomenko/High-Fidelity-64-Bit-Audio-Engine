@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "IAudioDecoder.h"
 #include <unistd.h>
 
@@ -57,6 +57,7 @@ public:
     uint32_t getSampleRate() const override { return m_initialized ? mp3Frame.sampleRate : 0; }
     size_t getNumChannels() const override { return m_initialized ? mp3Frame.channels : 0; }
     uint64_t getTotalFrames() const override { return m_initialized ? drmp3_get_pcm_frame_count(&mp3Frame) : 0; }
+    uint64_t getCurrentFrame() const override { return m_initialized ? mp3Frame.currentPCMFrame : 0; }
 
 private:
     mutable drmp3 mp3Frame;

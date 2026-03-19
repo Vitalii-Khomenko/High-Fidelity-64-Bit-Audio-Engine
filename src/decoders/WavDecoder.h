@@ -7,7 +7,7 @@
 
 class WavDecoder : public audio_engine::decoders::IAudioDecoder {
 public:
-    WavDecoder() : m_fd(-1) {}
+    WavDecoder() : m_fd(-1), m_currentFrame(0) {}
 
     ~WavDecoder() override {
         if (m_initialized) {
@@ -20,12 +20,14 @@ public:
 
     bool open(const std::string& filepath) override {
         m_initialized = drwav_init_file(&wavFrame, filepath.c_str(), nullptr);
+        m_currentFrame = 0;
         return m_initialized;
     }
 
     bool openFd(int fd) override {
         m_fd = dup(fd);
         m_initialized = drwav_init(&wavFrame, onRead, onSeek, onTell, &m_fd, nullptr);
+        m_currentFrame = 0;
         if (!m_initialized) {
             close(m_fd);
             m_fd = -1;
@@ -36,12 +38,14 @@ public:
 
     size_t readFrames(audio_engine::core::AudioBuffer& buffer, size_t framesToRead) override {
         if (!m_initialized) return 0;
-        
+
         uint32_t channels = getNumChannels();
         std::vector<float> tempBuffer(framesToRead * channels);
         drwav_uint64 framesDecoded = drwav_read_pcm_frames_f32(&wavFrame, framesToRead, tempBuffer.data());
 
         if (framesDecoded == 0) return 0;
+
+        m_currentFrame += framesDecoded;
 
         for (uint32_t ch = 0; ch < channels; ++ch) {
             double* dest = buffer.getWritePointer(ch);
@@ -52,16 +56,23 @@ public:
         return static_cast<size_t>(framesDecoded);
     }
 
-    bool seekToFrame(uint64_t targetFrame) override { return m_initialized ? drwav_seek_to_pcm_frame(&wavFrame, targetFrame) == DRWAV_TRUE : false; }
-
+    bool seekToFrame(uint64_t targetFrame) override { 
+        if (!m_initialized) return false;
+        if (drwav_seek_to_pcm_frame(&wavFrame, targetFrame) == DRWAV_TRUE) {
+            m_currentFrame = targetFrame;
+            return true;
+        }
+        return false;
+    }
     uint32_t getSampleRate() const override { return m_initialized ? wavFrame.sampleRate : 0; }
     size_t getNumChannels() const override { return m_initialized ? wavFrame.channels : 0; }
     uint64_t getTotalFrames() const override { return m_initialized ? wavFrame.totalPCMFrameCount : 0; }
-
+    uint64_t getCurrentFrame() const override { return m_currentFrame; }
 private:
     drwav wavFrame;
     bool m_initialized = false;
     int m_fd;
+    uint64_t m_currentFrame;
 
     static size_t onRead(void* pUserData, void* pBufferOut, size_t bytesToRead) {
         int fd = *static_cast<int*>(pUserData);
@@ -74,7 +85,7 @@ private:
         int whence = SEEK_SET;
         if (origin == DRWAV_SEEK_CUR) whence = SEEK_CUR;
         if (origin == DRWAV_SEEK_END) whence = SEEK_END;
-        
+
         off_t newPos = lseek(fd, offset, whence);
         return newPos >= 0 ? DRWAV_TRUE : DRWAV_FALSE;
     }

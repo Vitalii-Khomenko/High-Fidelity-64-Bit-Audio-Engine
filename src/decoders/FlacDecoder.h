@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "IAudioDecoder.h"
 #include <unistd.h>
 
@@ -60,6 +60,7 @@ public:
     uint32_t getSampleRate() const override { return pFlac ? pFlac->sampleRate : 0; }
     size_t getNumChannels() const override { return pFlac ? pFlac->channels : 0; }
     uint64_t getTotalFrames() const override { return pFlac ? pFlac->totalPCMFrameCount : 0; }
+    uint64_t getCurrentFrame() const override { return pFlac ? pFlac->currentPCMFrame : 0; }
 
 private:
     drflac* pFlac;

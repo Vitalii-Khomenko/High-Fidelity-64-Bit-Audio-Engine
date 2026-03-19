@@ -1,5 +1,6 @@
 ﻿package com.aiproject.musicplayer
 
+import android.Manifest
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -9,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.provider.DocumentsContract
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -18,13 +20,16 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 
 data class AudioTrack(val uri: Uri, val name: String)
 
@@ -49,10 +54,14 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         Intent(this, PlaybackService::class.java).also { intent ->
             bindService(intent, connection, Context.BIND_AUTO_CREATE)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent)
-            } else {
-                startService(intent)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(intent)
+                } else {
+                    startService(intent)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
     }
@@ -74,9 +83,52 @@ class MainActivity : ComponentActivity() {
                 var playlist by remember { mutableStateOf(listOf<AudioTrack>()) }
                 var currentTrack by remember { mutableStateOf<AudioTrack?>(null) }
                 var volume by remember { mutableFloatStateOf(1.0f) }
-                var progressMs by remember { mutableStateOf(0f) } // Placeholder for actual progress
+                
+                var progressMs by remember { mutableStateOf(0f) }
+                var durationMs by remember { mutableStateOf(1f) }
+                var isSeeking by remember { mutableStateOf(false) }
+
+                var speedMult by remember { mutableFloatStateOf(1.0f) }
+                var showMenu by remember { mutableStateOf(false) }
+
+                // Continuous UI update loop for duration/progress
+                LaunchedEffect(isBound, currentTrack) {
+                    while (true) {
+                        if (isBound && !isSeeking) {
+                            val engine = playbackService?.getEngine()
+                            if (engine != null) {
+                                val current = engine.getPositionMs().toFloat()
+                                val total = engine.getDurationMs().toFloat()
+                                if (total > 0f) {
+                                    durationMs = total
+                                    if (current in 0f..total) {
+                                        progressMs = current
+                                    }
+                                }
+                            }
+                        }
+                        delay(500)
+                    }
+                }
+
+                val permissionLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestMultiplePermissions()
+                ) { _ -> }
 
                 LaunchedEffect(Unit) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        permissionLauncher.launch(
+                            arrayOf(
+                                Manifest.permission.POST_NOTIFICATIONS,
+                                Manifest.permission.READ_MEDIA_AUDIO
+                            )
+                        )
+                    } else {
+                        permissionLauncher.launch(
+                            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+                        )
+                    }
+
                     val persistedUris = contentResolver.persistedUriPermissions
                     val loadedTracks = mutableListOf<AudioTrack>()
                     for (permission in persistedUris) {
@@ -94,10 +146,9 @@ class MainActivity : ComponentActivity() {
                                     val idColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
                                     val nameColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
                                     val mimeColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
-
                                     while (cursor.moveToNext()) {
                                         val mimeType = cursor.getString(mimeColumn)
-                                        if (mimeType.startsWith("audio/")) {
+                                        if (mimeType != null && mimeType.startsWith("audio/")) {
                                             val docId = cursor.getString(idColumn)
                                             val name = cursor.getString(nameColumn)
                                             val trackUri = DocumentsContract.buildDocumentUriUsingTree(permission.uri, docId)
@@ -137,7 +188,7 @@ class MainActivity : ComponentActivity() {
 
                             while (cursor.moveToNext()) {
                                 val mimeType = cursor.getString(mimeColumn)
-                                if (mimeType.startsWith("audio/")) {
+                                if (mimeType != null && mimeType.startsWith("audio/")) {
                                     val docId = cursor.getString(idColumn)
                                     val name = cursor.getString(nameColumn)
                                     val trackUri = DocumentsContract.buildDocumentUriUsingTree(it, docId)
@@ -152,18 +203,43 @@ class MainActivity : ComponentActivity() {
                 Scaffold(
                     topBar = {
                         TopAppBar(
-                            title = { Text("ZionAudioPro 64-bit") },
+                            title = { Text("64-Bit Audiophile Player") },
                             actions = {
-                                Button(onClick = { folderPickerLauncher.launch(null) }) {
-                                    Text("Add Folder +")
+                                IconButton(onClick = { showMenu = !showMenu }) {
+                                    Icon(Icons.Filled.MoreVert, contentDescription = "Menu")
+                                }
+                                DropdownMenu(
+                                    expanded = showMenu,
+                                    onDismissRequest = { showMenu = false }
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("Add Folder") },
+                                        onClick = {
+                                            showMenu = false
+                                            folderPickerLauncher.launch(null)
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Create Playlist") },
+                                        onClick = {
+                                            showMenu = false
+                                            Toast.makeText(this@MainActivity, "Room DB Playlist Creation Coming", Toast.LENGTH_SHORT).show()
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Settings") },
+                                        onClick = {
+                                            showMenu = false
+                                        },
+                                        leadingIcon = { Icon(Icons.Filled.Settings, contentDescription = null) }
+                                    )
                                 }
                             }
                         )
                     }
                 ) { padding ->
                     Column(modifier = Modifier.padding(padding).fillMaxSize()) {
-                        
-                        // Player Controls Base
+
                         Card(
                             modifier = Modifier.fillMaxWidth().padding(16.dp),
                             elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
@@ -175,39 +251,55 @@ class MainActivity : ComponentActivity() {
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
-                                Spacer(modifier = Modifier.height(16.dp))
+                                Spacer(modifier = Modifier.height(8.dp))
 
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.Center
+                                    horizontalArrangement = Arrangement.SpaceEvenly
                                 ) {
                                     Button(onClick = {
-                                        if (isBound) {
-                                            playbackService?.getEngine()?.pause()
-                                        }
-                                    }) {
-                                        Text("Stop/Pause")
-                                    }
+                                        if (isBound) { playbackService?.getEngine()?.play() }
+                                    }) { Text("Play") }
+                                    
+                                    Button(onClick = {
+                                        if (isBound) { playbackService?.getEngine()?.pause() }
+                                    }) { Text("Pause") }
                                 }
 
                                 Spacer(modifier = Modifier.height(16.dp))
 
-                                // Seek Slider Mock
-                                Text(text = "Seek (ms)", style = MaterialTheme.typography.labelSmall)
+                                // Seek Slider
+                                val progStr = String.format("%02d:%02d", (progressMs / 60000).toInt(), ((progressMs / 1000) % 60).toInt())
+                                val durStr = String.format("%02d:%02d", (durationMs / 60000).toInt(), ((durationMs / 1000) % 60).toInt())
+                                Text(text = "Position:  / ", style = MaterialTheme.typography.labelSmall)
+                                
                                 Slider(
                                     value = progressMs,
                                     onValueChange = { newVal ->
                                         progressMs = newVal
+                                        isSeeking = true
                                     },
                                     onValueChangeFinished = {
                                         if (isBound) {
                                             playbackService?.getEngine()?.seekTo(progressMs.toDouble())
                                         }
+                                        isSeeking = false
                                     },
-                                    valueRange = 0f..300000f // Hardcoded up to 5 min for UI testing
+                                    valueRange = 0f..durationMs
                                 )
 
-                                Spacer(modifier = Modifier.height(16.dp))
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                Text(text = "Speed: ", style = MaterialTheme.typography.labelSmall)
+                                Slider(
+                                    value = speedMult,
+                                    onValueChange = { newVal ->
+                                        speedMult = newVal
+                                    },
+                                    valueRange = 0.5f..2.5f
+                                )
+
+                                Spacer(modifier = Modifier.height(8.dp))
 
                                 Text(text = "Volume (64-bit precise): %", style = MaterialTheme.typography.labelSmall)
                                 Slider(
@@ -233,16 +325,21 @@ class MainActivity : ComponentActivity() {
                         LazyColumn(modifier = Modifier.weight(1f)) {
                             items(playlist) { track ->
                                 ListItem(
-                                    headlineContent = { 
-                                        Text(track.name, maxLines = 1, overflow = TextOverflow.Ellipsis) 
+                                    headlineContent = {
+                                        Text(track.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     },
                                     leadingContent = {
                                         Icon(Icons.Filled.PlayArrow, contentDescription = "Play")
                                     },
                                     modifier = Modifier.clickable {
                                         currentTrack = track
-                                        if (isBound) {
-                                            playbackService?.playTrack(track.uri, this@MainActivity, track.name)
+                                        try {
+                                            if (isBound) {
+                                                playbackService?.playTrack(track.uri, this@MainActivity, track.name)
+                                            }
+                                        } catch (e: Exception) {
+                                            e.printStackTrace()
+                                            Toast.makeText(this@MainActivity, "Error playing track", Toast.LENGTH_SHORT).show()
                                         }
                                     }
                                 )
