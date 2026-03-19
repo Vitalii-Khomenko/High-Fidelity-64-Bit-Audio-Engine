@@ -25,18 +25,36 @@ public:
 
     bool openFd(int fd) override {
         m_fd = dup(fd);
+        if (m_fd < 0) return false;
+
+        // ── Step 1: count total frames ──────────────────────────────────────
+        // drmp3_get_pcm_frame_count() reads the entire file and leaves the
+        // file offset at EOF.  For VBR files without an Xing/Info header,
+        // drmp3_seek_to_pcm_frame(0) is unreliable and silently fails,
+        // leaving the decoder at EOF — the very cause of "plays 1 s then stops".
+        // We therefore reinitialise from scratch after counting.
         m_initialized = drmp3_init(&mp3Frame, onRead, onSeek, onTell, nullptr, &m_fd, nullptr);
         if (!m_initialized) {
             close(m_fd);
             m_fd = -1;
             return false;
         }
-        // Cache total frames ONCE on open to avoid repeated file scanning during playback.
-        // drmp3_get_pcm_frame_count() scans the entire file and moves the read position,
-        // so calling it repeatedly (e.g. every 500ms from UI) causes data races and corrupts playback.
         m_totalFrames = drmp3_get_pcm_frame_count(&mp3Frame);
-        // Reset position back to the beginning after scanning
-        drmp3_seek_to_pcm_frame(&mp3Frame, 0);
+        drmp3_uninit(&mp3Frame);   // releases drmp3 state; does NOT close m_fd
+        m_initialized = false;
+
+        // ── Step 2: rewind fd and reinitialise for playback ─────────────────
+        if (lseek(m_fd, 0, SEEK_SET) < 0) {
+            close(m_fd);
+            m_fd = -1;
+            return false;
+        }
+        m_initialized = drmp3_init(&mp3Frame, onRead, onSeek, onTell, nullptr, &m_fd, nullptr);
+        if (!m_initialized) {
+            close(m_fd);
+            m_fd = -1;
+            return false;
+        }
         return true;
     }
 
