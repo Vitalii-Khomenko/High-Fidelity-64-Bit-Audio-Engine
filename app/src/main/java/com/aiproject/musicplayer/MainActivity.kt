@@ -123,6 +123,7 @@ class MainActivity : ComponentActivity() {
                 fun playAtIndex(index: Int) {
                     if (index !in playlist.indices) return
                     currentIndex = index
+                    isPlaying = true   // optimistic: engine confirms via poll loop
                     val track = playlist[index]
                     if (isBound) {
                         playbackService?.playTrack(track.uri, this@MainActivity, track.name)
@@ -616,9 +617,9 @@ class MainActivity : ComponentActivity() {
                                     // Stop
                                     IconButton(onClick = {
                                         if (isBound) {
-                                            playbackService?.getEngine()?.pause()
-                                            playbackService?.getEngine()?.seekTo(0.0)
+                                            playbackService?.stopPlayback()
                                         }
+                                        isPlaying = false
                                         progressMs = 0f
                                     }) {
                                         Icon(Icons.Filled.Stop, contentDescription = "Stop", modifier = Modifier.size(28.dp))
@@ -677,7 +678,13 @@ class MainActivity : ComponentActivity() {
                                 fontWeight = FontWeight.SemiBold
                             )
                             if (playlist.isNotEmpty()) {
-                                TextButton(onClick = { playlist = emptyList(); currentIndex = -1 }) {
+                                TextButton(onClick = {
+                                    if (isBound) playbackService?.stopPlayback()
+                                    playlist = emptyList()
+                                    currentIndex = -1
+                                    isPlaying = false
+                                    progressMs = 0f
+                                }) {
                                     Text("Clear", style = MaterialTheme.typography.labelSmall)
                                 }
                             }
