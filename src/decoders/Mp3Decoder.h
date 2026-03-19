@@ -31,6 +31,12 @@ public:
             m_fd = -1;
             return false;
         }
+        // Cache total frames ONCE on open to avoid repeated file scanning during playback.
+        // drmp3_get_pcm_frame_count() scans the entire file and moves the read position,
+        // so calling it repeatedly (e.g. every 500ms from UI) causes data races and corrupts playback.
+        m_totalFrames = drmp3_get_pcm_frame_count(&mp3Frame);
+        // Reset position back to the beginning after scanning
+        drmp3_seek_to_pcm_frame(&mp3Frame, 0);
         return true;
     }
 
@@ -56,13 +62,15 @@ public:
 
     uint32_t getSampleRate() const override { return m_initialized ? mp3Frame.sampleRate : 0; }
     size_t getNumChannels() const override { return m_initialized ? mp3Frame.channels : 0; }
-    uint64_t getTotalFrames() const override { return m_initialized ? drmp3_get_pcm_frame_count(&mp3Frame) : 0; }
+    uint32_t getBitsPerSample() const override { return 16; } // MP3 is always 16-bit encoded
+    uint64_t getTotalFrames() const override { return m_initialized ? m_totalFrames : 0; }
     uint64_t getCurrentFrame() const override { return m_initialized ? mp3Frame.currentPCMFrame : 0; }
 
 private:
     mutable drmp3 mp3Frame;
     bool m_initialized = false;
     int m_fd;
+    uint64_t m_totalFrames = 0;
 
     static size_t onRead(void* pUserData, void* pBufferOut, size_t bytesToRead) {
         int fd = *static_cast<int*>(pUserData);

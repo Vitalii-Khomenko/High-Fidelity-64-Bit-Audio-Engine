@@ -22,6 +22,7 @@ public:
         m_isPlaying(false),
         m_stopThread(false),
         m_seekRequest(-1),
+        m_speed(1.0),
         m_ringBuffer(std::make_unique<RingBuffer<double>>(65536))
     {
         m_gainProcessor = std::make_unique<dsp::GainProcessor>();
@@ -50,6 +51,26 @@ public:
         // Terminate and properly re-init
         m_endpoint->terminate();
         m_endpoint->initialize(sampleRate, channels);
+    }
+
+    void setSpeed(double speed) {
+        if (speed < 0.25) speed = 0.25;
+        if (speed > 4.0) speed = 4.0;
+        m_speed.store(speed, std::memory_order_relaxed);
+    }
+
+    bool isPlaying() const {
+        return m_isPlaying.load(std::memory_order_relaxed);
+    }
+
+    uint32_t getSampleRate() const {
+        if (!m_decoder) return 0;
+        return m_decoder->getSampleRate();
+    }
+
+    uint32_t getBitsPerSample() const {
+        if (!m_decoder) return 0;
+        return m_decoder->getBitsPerSample();
     }
 
     void setVolume(double linearVolume) {
@@ -131,7 +152,9 @@ private:
     void decodeLoop() {
         const size_t CHUNK_FRAMES = 1024;
         const size_t channels = m_decoder->getNumChannels();
-        AudioBuffer pcmBuffer(channels, CHUNK_FRAMES, m_decoder->getSampleRate());
+        // Source buffer large enough for 4x speed (max speed)
+        AudioBuffer srcBuffer(channels, CHUNK_FRAMES * 4, m_decoder->getSampleRate());
+        AudioBuffer outBuffer(channels, CHUNK_FRAMES, m_decoder->getSampleRate());
         std::vector<double> interleaved(CHUNK_FRAMES * channels);
 
         while (!m_stopThread) {
@@ -147,31 +170,76 @@ private:
                 continue;
             }
 
-            size_t framesRead = m_decoder->readFrames(pcmBuffer, CHUNK_FRAMES);
-            if (framesRead == 0) {
-                seekFrame = m_seekRequest.load(std::memory_order_acquire);
-                if (seekFrame >= 0) continue;
+            double speed = m_speed.load(std::memory_order_relaxed);
+            bool normalSpeed = (speed > 0.99 && speed < 1.01);
 
-                m_isPlaying = false;
-                break;
-            }
-
-            m_eqProcessor->processBlock(pcmBuffer);
-            m_gainProcessor->processBlock(pcmBuffer);
-
-            for (size_t f = 0; f < framesRead; ++f) {
-                for (size_t ch = 0; ch < channels; ++ch) {
-                    interleaved[f * channels + ch] = pcmBuffer.getReadPointer(ch)[f];
+            if (normalSpeed) {
+                // Fast path: no resampling needed
+                size_t framesRead = m_decoder->readFrames(outBuffer, CHUNK_FRAMES);
+                if (framesRead == 0) {
+                    seekFrame = m_seekRequest.load(std::memory_order_acquire);
+                    if (seekFrame >= 0) continue;
+                    m_isPlaying = false;
+                    break;
                 }
-            }
 
-            m_ringBuffer->write(interleaved.data(), framesRead * channels);
+                m_eqProcessor->processBlock(outBuffer);
+                m_gainProcessor->processBlock(outBuffer);
+
+                for (size_t f = 0; f < framesRead; ++f) {
+                    for (size_t ch = 0; ch < channels; ++ch) {
+                        interleaved[f * channels + ch] = outBuffer.getReadPointer(ch)[f];
+                    }
+                }
+                m_ringBuffer->write(interleaved.data(), framesRead * channels);
+            } else {
+                // Speed-change path: decode speed*CHUNK_FRAMES source frames,
+                // then linear-interpolate resample to exactly CHUNK_FRAMES output frames.
+                size_t srcFramesToRead = static_cast<size_t>(CHUNK_FRAMES * speed + 0.5);
+                if (srcFramesToRead < 1) srcFramesToRead = 1;
+                if (srcFramesToRead > CHUNK_FRAMES * 4) srcFramesToRead = CHUNK_FRAMES * 4;
+
+                size_t framesRead = m_decoder->readFrames(srcBuffer, srcFramesToRead);
+                if (framesRead == 0) {
+                    seekFrame = m_seekRequest.load(std::memory_order_acquire);
+                    if (seekFrame >= 0) continue;
+                    m_isPlaying = false;
+                    break;
+                }
+
+                // Linear interpolation resample: framesRead src frames -> CHUNK_FRAMES output frames.
+                // NOTE: We resample FIRST, then apply DSP on the correctly-sized interleaved output.
+                // This avoids applying DSP to extra zero-padded frames in the oversized srcBuffer.
+                size_t outFrames = CHUNK_FRAMES;
+                double ratio = (framesRead > 1)
+                    ? static_cast<double>(framesRead - 1) / static_cast<double>(outFrames - 1)
+                    : 0.0;
+
+                for (size_t f = 0; f < outFrames; ++f) {
+                    double srcPos = f * ratio;
+                    size_t i0 = static_cast<size_t>(srcPos);
+                    size_t i1 = i0 + 1;
+                    if (i1 >= framesRead) i1 = framesRead - 1;
+                    double frac = srcPos - static_cast<double>(i0);
+
+                    for (size_t ch = 0; ch < channels; ++ch) {
+                        const double* src = srcBuffer.getReadPointer(ch);
+                        interleaved[f * channels + ch] = src[i0] * (1.0 - frac) + src[i1] * frac;
+                    }
+                }
+
+                // Apply gain smoothly on the correctly-sized interleaved output.
+                m_gainProcessor->processRawInterleaved(interleaved.data(), outFrames, channels);
+
+                m_ringBuffer->write(interleaved.data(), outFrames * channels);
+            }
         }
     }
 
     std::atomic<bool> m_isPlaying;
     std::atomic<bool> m_stopThread;
     std::atomic<int64_t> m_seekRequest;
+    std::atomic<double> m_speed;
     std::thread m_decodeThread;
 
     std::unique_ptr<decoders::IAudioDecoder> m_decoder;

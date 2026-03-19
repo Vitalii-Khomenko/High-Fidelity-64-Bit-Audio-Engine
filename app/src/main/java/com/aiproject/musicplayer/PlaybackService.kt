@@ -1,4 +1,4 @@
-﻿package com.aiproject.musicplayer
+package com.aiproject.musicplayer
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -26,6 +26,9 @@ class PlaybackService : Service() {
     private lateinit var audioEngine: AudioEngine
     private var audioFocusRequest: AudioFocusRequest? = null
 
+    // Current track title for notification
+    private var currentTitle: String = ""
+
     fun getEngine(): AudioEngine = audioEngine
 
     inner class LocalBinder : Binder() {
@@ -36,12 +39,15 @@ class PlaybackService : Service() {
         super.onCreate()
         audioEngine = AudioEngine()
         audioEngine.initEngine()
-
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-
         setupMediaSession()
         createNotificationChannel()
-        showNotification("Ready")
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Show foreground notification immediately on start to satisfy Android's 5-second rule
+        showNotification(currentTitle.ifEmpty { "" })
+        return START_STICKY
     }
 
     private fun setupMediaSession() {
@@ -57,6 +63,7 @@ class PlaybackService : Service() {
                 override fun onPause() {
                     audioEngine.pause()
                     updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
+                    abandonAudioFocus()
                 }
 
                 override fun onStop() {
@@ -64,6 +71,14 @@ class PlaybackService : Service() {
                     updatePlaybackState(PlaybackStateCompat.STATE_STOPPED)
                     abandonAudioFocus()
                     stopSelf()
+                }
+
+                override fun onSkipToNext() {
+                    // Handled by MainActivity via currentIndex
+                }
+
+                override fun onSkipToPrevious() {
+                    // Handled by MainActivity via currentIndex
                 }
 
                 override fun onSeekTo(pos: Long) {
@@ -75,26 +90,28 @@ class PlaybackService : Service() {
     }
 
     fun playTrack(uri: Uri, context: Context, title: String) {
+        currentTitle = title
         if (requestAudioFocus()) {
             audioEngine.playTrack(uri, context)
-
-            val metadata = MediaMetadataCompat.Builder()
-                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
-                .build()
-            mediaSession.setMetadata(metadata)
-
-            updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
-            showNotification(title)
         } else {
-            // Even without focus, attempt to play local explicitly if requested by user manually
+            // Even without focus, play if user explicitly requested
             audioEngine.playTrack(uri, context)
-            showNotification(title)
         }
+
+        val metadata = MediaMetadataCompat.Builder()
+            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
+            .build()
+        mediaSession.setMetadata(metadata)
+        updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
+        showNotification(title)
     }
 
     fun setPlaybackSpeed(speed: Double) {
-        // We will call native method here once implemented
-        // audioEngine.setSpeed(speed)
+        audioEngine.setSpeed(speed)
+    }
+
+    fun setVolume(volume: Double) {
+        audioEngine.setVolume(volume)
     }
 
     private fun requestAudioFocus(): Boolean {
@@ -108,12 +125,21 @@ class PlaybackService : Service() {
                 .setAudioAttributes(attributes)
                 .setOnAudioFocusChangeListener { focusChange ->
                     when (focusChange) {
-                        AudioManager.AUDIOFOCUS_LOSS -> mediaSession.controller.transportControls.pause()
-                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> mediaSession.controller.transportControls.pause()
-                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> audioEngine.setVolume(0.2)
+                        AudioManager.AUDIOFOCUS_LOSS -> {
+                            audioEngine.pause()
+                            updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
+                        }
+                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                            audioEngine.pause()
+                            updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
+                        }
+                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                            audioEngine.setVolume(0.2)
+                        }
                         AudioManager.AUDIOFOCUS_GAIN -> {
                             audioEngine.setVolume(1.0)
-                            mediaSession.controller.transportControls.play()
+                            audioEngine.play()
+                            updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
                         }
                     }
                 }.build()
@@ -141,14 +167,17 @@ class PlaybackService : Service() {
     }
 
     private fun updatePlaybackState(state: Int) {
+        val positionMs = try { audioEngine.getPositionMs().toLong() } catch (e: Exception) { 0L }
         val playbackState = PlaybackStateCompat.Builder()
             .setActions(
                 PlaybackStateCompat.ACTION_PLAY or
                 PlaybackStateCompat.ACTION_PAUSE or
                 PlaybackStateCompat.ACTION_STOP or
-                PlaybackStateCompat.ACTION_SEEK_TO
+                PlaybackStateCompat.ACTION_SEEK_TO or
+                PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
             )
-            .setState(state, PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1.0f)
+            .setState(state, positionMs, 1.0f)
             .build()
         mediaSession.setPlaybackState(playbackState)
     }
@@ -168,15 +197,20 @@ class PlaybackService : Service() {
         }
     }
 
-    private fun showNotification(title: String) {
+    fun showNotification(title: String) {
         val intent = Intent(this, MainActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0, intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
 
+        val contentTitle = if (title.isEmpty()) "MusicPlayerPro" else title
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(if (title == "Ready") "Player Ready" else "Playing: ")
-            .setContentText("MusicPlayerPro 64-bit Engine")
+            .setContentTitle(contentTitle)
+            .setContentText("64-bit Audiophile Engine")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentIntent(pendingIntent)
+            .setOngoing(true)
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

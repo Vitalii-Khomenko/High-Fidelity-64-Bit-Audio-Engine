@@ -66,6 +66,7 @@ public:
     }
     uint32_t getSampleRate() const override { return m_initialized ? wavFrame.sampleRate : 0; }
     size_t getNumChannels() const override { return m_initialized ? wavFrame.channels : 0; }
+    uint32_t getBitsPerSample() const override { return m_initialized ? wavFrame.bitsPerSample : 0; }
     uint64_t getTotalFrames() const override { return m_initialized ? wavFrame.totalPCMFrameCount : 0; }
     uint64_t getCurrentFrame() const override { return m_currentFrame; }
 private:

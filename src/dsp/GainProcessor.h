@@ -81,6 +81,35 @@ public:
         setGainLinear(std::pow(10.0, dB / 20.0));
     }
 
+    /**
+     * @brief Apply smoothed gain to a raw interleaved buffer (used by speed-change path).
+     *        Processes exactly numFrames * numChannels samples with the same smoothing
+     *        as processBlock(), without requiring an AudioBuffer wrapper.
+     */
+    void processRawInterleaved(double* data, size_t numFrames, size_t numChannels) {
+        if (!data || numFrames == 0) return;
+
+        double currentGain = m_gain.load(std::memory_order_acquire);
+        double targetGain  = m_targetGain.load(std::memory_order_acquire);
+
+        if (std::abs(currentGain - targetGain) < 1e-9) {
+            if (std::abs(currentGain - 1.0) >= 1e-9) {
+                size_t total = numFrames * numChannels;
+                for (size_t i = 0; i < total; ++i) {
+                    data[i] *= currentGain;
+                }
+            }
+        } else {
+            for (size_t f = 0; f < numFrames; ++f) {
+                currentGain += (targetGain - currentGain) * m_smoothFactor;
+                for (size_t ch = 0; ch < numChannels; ++ch) {
+                    data[f * numChannels + ch] *= currentGain;
+                }
+            }
+            m_gain.store(currentGain, std::memory_order_release);
+        }
+    }
+
 private:
     std::atomic<double> m_gain;
     std::atomic<double> m_targetGain;

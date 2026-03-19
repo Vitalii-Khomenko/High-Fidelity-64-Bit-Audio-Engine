@@ -26,6 +26,13 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_aiproject_musicplayer_AudioEngine_setEqEnabled(JNIEnv* env, jobject /* this */, jboolean enabled) {
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_aiproject_musicplayer_AudioEngine_setSpeed(JNIEnv* env, jobject /* this */, jdouble speed) {
+    if (g_player) {
+        g_player->setSpeed(speed);
+    }
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_aiproject_musicplayer_AudioEngine_loadFileFd(JNIEnv* env, jobject /* this */, jint fd) {
     if (!g_player) return JNI_FALSE;
@@ -94,4 +101,22 @@ extern "C" JNIEXPORT jdouble JNICALL
 Java_com_aiproject_musicplayer_AudioEngine_getPositionMs(JNIEnv* env, jobject /* this */) {
     if (g_player) return g_player->getPositionMs();
     return 0.0;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_aiproject_musicplayer_AudioEngine_isPlaying(JNIEnv* env, jobject /* this */) {
+    if (g_player) return g_player->isPlaying() ? JNI_TRUE : JNI_FALSE;
+    return JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_aiproject_musicplayer_AudioEngine_getSampleRateNative(JNIEnv* env, jobject /* this */) {
+    if (g_player) return static_cast<jint>(g_player->getSampleRate());
+    return 0;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_aiproject_musicplayer_AudioEngine_getBitsPerSample(JNIEnv* env, jobject /* this */) {
+    if (g_player) return static_cast<jint>(g_player->getBitsPerSample());
+    return 0;
 }
