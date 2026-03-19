@@ -1,4 +1,4 @@
-package com.aiproject.musicplayer
+﻿package com.aiproject.musicplayer
 
 import android.content.Context
 import android.net.Uri
@@ -36,4 +36,7 @@ class AudioEngine {
 
     external fun play()
     external fun pause()
+
+    // Seek natively with precise PCM frame alignment
+    external fun seekTo(positionMs: Double)
 }

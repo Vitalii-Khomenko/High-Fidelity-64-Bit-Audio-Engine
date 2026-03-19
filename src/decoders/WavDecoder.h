@@ -52,6 +52,8 @@ public:
         return static_cast<size_t>(framesDecoded);
     }
 
+    bool seekToFrame(uint64_t targetFrame) override { return m_initialized ? drwav_seek_to_pcm_frame(&wavFrame, targetFrame) == DRWAV_TRUE : false; }
+
     uint32_t getSampleRate() const override { return m_initialized ? wavFrame.sampleRate : 0; }
     size_t getNumChannels() const override { return m_initialized ? wavFrame.channels : 0; }
     uint64_t getTotalFrames() const override { return m_initialized ? wavFrame.totalPCMFrameCount : 0; }

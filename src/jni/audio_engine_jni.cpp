@@ -87,3 +87,9 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_aiproject_musicplayer_AudioEngine_shutdownEngine(JNIEnv* env, jobject /* this */) {
     g_player.reset();
 }
+extern "C" JNIEXPORT void JNICALL
+Java_com_aiproject_musicplayer_AudioEngine_seekTo(JNIEnv* env, jobject /* this */, jdouble positionMs) {
+    if (g_player) {
+        g_player->seekToMs(positionMs);
+    }
+}
