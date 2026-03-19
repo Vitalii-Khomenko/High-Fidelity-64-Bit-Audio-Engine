@@ -4,25 +4,25 @@ import androidx.room.*
 import kotlinx.coroutines.flow.Flow
 
 @Dao
-interface TrackDao {
-    @Query("SELECT * FROM tracks ORDER BY dateAdded DESC")
-    fun getAllTracks(): Flow<List<TrackEntity>>
-
-    @Insert(onConflict = OnConflictStrategy.IGNORE)
-    suspend fun insertTrack(track: TrackEntity): Long
-
-    @Delete
-    suspend fun deleteTrack(track: TrackEntity)
-    
-    @Query("DELETE FROM tracks")
-    suspend fun clearAll()
-}
-
-@Dao
 interface PlaylistDao {
     @Query("SELECT * FROM playlists")
     fun getAllPlaylists(): Flow<List<PlaylistEntity>>
 
-    @Insert
-    suspend fun insertPlaylist(playlist: PlaylistEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertPlaylist(playlist: PlaylistEntity): Long
+
+    @Delete
+    suspend fun deletePlaylist(playlist: PlaylistEntity)
+}
+
+@Dao
+interface TrackDao {
+    @Query("SELECT * FROM playlist_tracks WHERE playlistId = :playlistId")
+    fun getTracksForPlaylist(playlistId: Int): Flow<List<PlaylistTrackEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertTrack(track: PlaylistTrackEntity): Long
+
+    @Query("DELETE FROM playlist_tracks WHERE playlistId = :playlistId")
+    suspend fun deleteTracksForPlaylist(playlistId: Int)
 }

@@ -11,6 +11,14 @@ import android.os.Bundle
 import android.os.IBinder
 import android.provider.DocumentsContract
 import android.widget.Toast
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
+import com.aiproject.musicplayer.db.*
+import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.window.Dialog
+import androidx.compose.foundation.lazy.items
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -90,6 +98,12 @@ class MainActivity : ComponentActivity() {
 
                 var speedMult by remember { mutableFloatStateOf(1.0f) }
                 var showMenu by remember { mutableStateOf(false) }
+    var showCreatePlaylist by remember { mutableStateOf(false) }
+    var playlistName by remember { mutableStateOf("") }
+    var showLoadPlaylist by remember { mutableStateOf(false) }
+    
+    val db = remember { MusicDatabase.getDatabase(applicationContext) }
+    val playlists by db.playlistDao().getAllPlaylists().collectAsState(initial = emptyList())
 
                 // Continuous UI update loop for duration/progress
                 LaunchedEffect(isBound, currentTrack) {
@@ -200,7 +214,85 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                Scaffold(
+                    if (showCreatePlaylist) {
+        AlertDialog(
+            onDismissRequest = { showCreatePlaylist = false },
+            title = { Text("Create Playlist") },
+            text = {
+                OutlinedTextField(
+                    value = playlistName,
+                    onValueChange = { playlistName = it },
+                    label = { Text("Playlist Name") }
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val name = playlistName.trim()
+                    if (name.isNotEmpty()) {
+                        lifecycleScope.launch(Dispatchers.IO) {
+                            val playlistId = db.playlistDao().insertPlaylist(PlaylistEntity(name = name))
+                            val currentTracks = playlist
+                            currentTracks.forEach { track ->
+                                db.trackDao().insertTrack(PlaylistTrackEntity(
+                                    playlistId = playlistId.toInt(),
+                                    uriString = track.uri.toString(),
+                                    title = track.name
+                                ))
+                            }
+                        }
+                    }
+                    showCreatePlaylist = false
+                    playlistName = ""
+                }) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCreatePlaylist = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+    if (showLoadPlaylist) {
+        AlertDialog(
+            onDismissRequest = { showLoadPlaylist = false },
+            title = { Text("Load Playlist") },
+            text = {
+                LazyColumn {
+                    items(playlists) { playlistItem ->
+                        Text(
+                            text = playlistItem.name,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                                                .clickable {
+                                    lifecycleScope.launch(Dispatchers.IO) {
+                                        val tracksList = db.trackDao().getTracksForPlaylist(playlistItem.id).first()
+                                        val newPlaylist = tracksList.map { dbTrack ->
+                                            AudioTrack(
+                                                uri = Uri.parse(dbTrack.uriString),
+                                                name = dbTrack.title
+                                            )
+                                        }
+                                        lifecycleScope.launch(Dispatchers.Main) {
+                                            playlist = newPlaylist
+                                            showLoadPlaylist = false
+                                        }
+                                    }
+                                }
+                                .padding(16.dp)
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showLoadPlaylist = false }) {
+                    Text("Close")
+                }
+            }
+        )
+    }
+    Scaffold(
                     topBar = {
                         TopAppBar(
                             title = { Text("64-Bit Audiophile Player") },
@@ -352,3 +444,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
+
+
+
+
+
+
