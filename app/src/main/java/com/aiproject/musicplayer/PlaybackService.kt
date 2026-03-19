@@ -27,6 +27,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -54,6 +55,12 @@ class PlaybackService : Service() {
     var skipToNextCallback:     (() -> Unit)? = null
     var skipToPreviousCallback: (() -> Unit)? = null
 
+    /** Called on Main thread when a track ends naturally (not paused/stopped by user). */
+    var onTrackCompleted: (() -> Unit)? = null
+
+    private var isManualStop  = false
+    private var completionJob: Job? = null
+
     fun getEngine(): AudioEngine = audioEngine
 
     inner class LocalBinder : Binder() {
@@ -79,11 +86,18 @@ class PlaybackService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        completionJob?.cancel()
         serviceScope.cancel()
         audioEngine.shutdownEngine()
         mediaSession.isActive = false
         mediaSession.release()
         abandonAudioFocus()
+    }
+
+    /** Stop playback and service when user swipes app away from recents. */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        stopPlayback()
+        stopSelf()
     }
 
     override fun onBind(intent: Intent): IBinder = binder
@@ -102,6 +116,8 @@ class PlaybackService : Service() {
                     }
                 }
                 override fun onPause() {
+                    isManualStop = true
+                    completionJob?.cancel()
                     pausedByFocusLoss = false
                     audioEngine.pause()
                     updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
@@ -120,6 +136,8 @@ class PlaybackService : Service() {
     // ── Public transport ─────────────────────────────────────────────────────
 
     fun stopPlayback() {
+        isManualStop = true
+        completionJob?.cancel()
         loadJob?.cancel()
         pausedByFocusLoss = false
         audioEngine.pause()
@@ -137,21 +155,20 @@ class PlaybackService : Service() {
      * load runs at a time.
      */
     fun playTrack(uri: Uri, context: Context, title: String) {
+        isManualStop = false
+        completionJob?.cancel()
         currentTitle = title
         pausedByFocusLoss = false
         requestAudioFocus()
-        // Show notification immediately with old title replaced
         showNotification(title, true)
 
         loadJob?.cancel()
         loadJob = serviceScope.launch {
-            // Only one native load at a time — second tap waits then runs
             loadMutex.withLock {
                 withContext(Dispatchers.IO) {
                     audioEngine.playTrack(uri, context)
                 }
             }
-            // Back on Main — update metadata with real duration now available
             val durationMs = try { audioEngine.getDurationMs().toLong() } catch (_: Exception) { 0L }
             mediaSession.setMetadata(
                 MediaMetadataCompat.Builder()
@@ -161,6 +178,22 @@ class PlaybackService : Service() {
             )
             updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
             showNotification(title, true)
+
+            // Monitor for natural track completion
+            completionJob = serviceScope.launch {
+                delay(800) // wait for playback to actually start
+                var wasPlaying = false
+                while (true) {
+                    val playing = audioEngine.isPlaying()
+                    if (playing) wasPlaying = true
+                    if (wasPlaying && !playing && !isManualStop) {
+                        // Track ended naturally — notify on Main thread
+                        onTrackCompleted?.invoke()
+                        break
+                    }
+                    delay(300)
+                }
+            }
         }
     }
 

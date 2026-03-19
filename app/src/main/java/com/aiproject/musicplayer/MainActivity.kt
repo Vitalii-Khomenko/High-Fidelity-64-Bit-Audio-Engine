@@ -41,6 +41,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
 
 data class AudioTrack(val uri: Uri, val name: String)
 
@@ -91,11 +93,34 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme {
+                // --- Persistent state prefs ---
+                val statePrefs = remember { getSharedPreferences("player_state", MODE_PRIVATE) }
+
+                // Helper to save/load playlist as JSON
+                fun savePlaylistToPrefs(tracks: List<AudioTrack>) {
+                    val arr = JSONArray()
+                    tracks.forEach { t ->
+                        arr.put(JSONObject().put("uri", t.uri.toString()).put("name", t.name))
+                    }
+                    statePrefs.edit().putString("playlist_json", arr.toString()).apply()
+                }
+                fun loadPlaylistFromPrefs(): List<AudioTrack> {
+                    val json = statePrefs.getString("playlist_json", null) ?: return emptyList()
+                    return try {
+                        val arr = JSONArray(json)
+                        (0 until arr.length()).map { i ->
+                            val o = arr.getJSONObject(i)
+                            AudioTrack(Uri.parse(o.getString("uri")), o.getString("name"))
+                        }
+                    } catch (_: Exception) { emptyList() }
+                }
+
                 // --- State ---
-                var playlist by remember { mutableStateOf(listOf<AudioTrack>()) }
-                var currentIndex by remember { mutableStateOf(-1) }
+                var playlist by remember { mutableStateOf(loadPlaylistFromPrefs()) }
+                var currentIndex by remember { mutableStateOf(statePrefs.getInt("current_index", -1)) }
                 var isPlaying by remember { mutableStateOf(false) }
                 var isLoadingTrack by remember { mutableStateOf(false) }
+                var positionRestored by remember { mutableStateOf(false) }
                 var volume by remember { mutableFloatStateOf(1.0f) }
                 var progressMs by remember { mutableStateOf(0f) }
                 var durationMs by remember { mutableStateOf(1f) }
@@ -141,12 +166,16 @@ class MainActivity : ComponentActivity() {
                 // ensures only one native load runs at a time.
                 fun playAtIndex(index: Int) {
                     if (index !in playlist.indices) return
-                    if (isLoadingTrack) return      // debounce: ignore while loading
+                    if (isLoadingTrack) return
                     currentIndex = index
-                    isPlaying = true                // optimistic
+                    isPlaying = true
                     isLoadingTrack = true
+                    progressMs = 0f        // reset progress immediately so auto-advance can't re-fire
+                    durationMs = 1f
+                    positionRestored = true // don't seek to saved pos when changing tracks manually
+                    // Persist index
+                    statePrefs.edit().putInt("current_index", index).apply()
                     val track = playlist[index]
-                    // Persist played state by URI (survives Activity recreation)
                     val uriStr = track.uri.toString()
                     if (uriStr !in playedUris) {
                         playedUris = playedUris + uriStr
@@ -167,27 +196,40 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // Wire up notification skip buttons — updated after every composition
-                // so they always capture the latest currentIndex / playlist.
+                // Wire up notification buttons and track-end callback.
+                // SideEffect runs after every recompose so callbacks always capture latest state.
                 SideEffect {
                     if (isBound) {
                         playbackService?.skipToNextCallback = {
                             val next = currentIndex + 1
-                            if (next in playlist.indices) {
+                            if (next in playlist.indices)
                                 lifecycleScope.launch(Dispatchers.Main) { playAtIndex(next) }
-                            }
                         }
                         playbackService?.skipToPreviousCallback = {
                             val prev = currentIndex - 1
-                            if (prev >= 0) {
+                            if (prev >= 0)
                                 lifecycleScope.launch(Dispatchers.Main) { playAtIndex(prev) }
+                        }
+                        // Track finished naturally → advance to next
+                        playbackService?.onTrackCompleted = {
+                            val next = currentIndex + 1
+                            if (next in playlist.indices) {
+                                lifecycleScope.launch(Dispatchers.Main) { playAtIndex(next) }
+                            } else {
+                                // End of playlist
+                                isPlaying = false
+                                currentIndex = -1
+                                progressMs = 0f
+                                statePrefs.edit()
+                                    .remove("current_index")
+                                    .remove("saved_position_ms")
+                                    .apply()
                             }
                         }
                     }
                 }
 
-                // Restore currentIndex after Activity recreation (e.g. opened from notification).
-                // Fires whenever isBound changes OR the playlist is (re)loaded.
+                // Restore currentIndex after Activity recreation.
                 LaunchedEffect(isBound, playlist.size) {
                     if (isBound && currentIndex == -1 && playlist.isNotEmpty()) {
                         val title = playbackService?.currentTitle
@@ -201,8 +243,21 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                // Restore saved playback position once after binding (audiobook resume).
+                LaunchedEffect(isBound) {
+                    if (isBound && !positionRestored && currentIndex >= 0) {
+                        positionRestored = true
+                        val savedPos = statePrefs.getFloat("saved_position_ms", 0f)
+                        if (savedPos > 2000f) {  // only restore if more than 2 seconds in
+                            delay(800) // let the engine settle after binding
+                            playbackService?.getEngine()?.seekTo(savedPos.toDouble())
+                        }
+                    }
+                }
+
                 // --- Continuous update loop: position, playing state, metadata ---
                 LaunchedEffect(isBound, currentIndex) {
+                    var saveCounter = 0
                     while (true) {
                         if (isBound) {
                             val engine = playbackService?.getEngine()
@@ -221,19 +276,15 @@ class MainActivity : ComponentActivity() {
                                 val bd = engine.getBitsPerSample()
                                 if (bd > 0) bitDepth = "$bd-bit"
 
-                                // Auto-advance to next track when current finishes
-                                // Guard: skip if a load is already in progress
-                                if (!isPlaying && !isLoadingTrack && currentIndex >= 0
-                                    && progressMs > 0f && durationMs > 0f
-                                    && (durationMs - progressMs) < 1000f
-                                ) {
-                                    val nextIdx = currentIndex + 1
-                                    if (nextIdx in playlist.indices) {
-                                        playAtIndex(nextIdx)
-                                    } else {
-                                        // End of playlist — reset
-                                        currentIndex = -1
-                                        progressMs = 0f
+                                // Save position every ~5 seconds while playing (audiobook resume)
+                                if (isPlaying && progressMs > 2000f) {
+                                    saveCounter++
+                                    if (saveCounter >= 10) { // 10 × 500ms = 5s
+                                        saveCounter = 0
+                                        statePrefs.edit()
+                                            .putFloat("saved_position_ms", progressMs)
+                                            .putInt("current_index", currentIndex)
+                                            .apply()
                                     }
                                 }
                             }
@@ -290,18 +341,24 @@ class MainActivity : ComponentActivity() {
                         )
                     }
 
-                    val persistedUris = contentResolver.persistedUriPermissions
-                    val loadedTracks = mutableListOf<AudioTrack>()
-                    for (permission in persistedUris) {
-                        try {
-                            if (permission.uri.toString().contains("tree")) {
-                                loadedTracks += loadTracksFromTree(permission.uri)
+                    // Only load from persisted folder URIs if we don't have a saved playlist
+                    if (playlist.isEmpty()) {
+                        val persistedUris = contentResolver.persistedUriPermissions
+                        val loadedTracks = mutableListOf<AudioTrack>()
+                        for (permission in persistedUris) {
+                            try {
+                                if (permission.uri.toString().contains("tree")) {
+                                    loadedTracks += loadTracksFromTree(permission.uri)
+                                }
+                            } catch (e: Exception) {
+                                e.printStackTrace()
                             }
-                        } catch (e: Exception) {
-                            e.printStackTrace()
+                        }
+                        if (loadedTracks.isNotEmpty()) {
+                            playlist = loadedTracks
+                            savePlaylistToPrefs(loadedTracks)
                         }
                     }
-                    if (loadedTracks.isNotEmpty()) playlist = loadedTracks
                 }
 
                 val folderPickerLauncher = rememberLauncherForActivityResult(
@@ -310,7 +367,9 @@ class MainActivity : ComponentActivity() {
                     uri?.let {
                         contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                         val newTracks = loadTracksFromTree(it)
-                        playlist = playlist + newTracks
+                        val updated = playlist + newTracks
+                        playlist = updated
+                        savePlaylistToPrefs(updated)
                         Toast.makeText(this@MainActivity, "Added ${newTracks.size} tracks", Toast.LENGTH_SHORT).show()
                     }
                 }
@@ -417,6 +476,11 @@ class MainActivity : ComponentActivity() {
                                                                 playlist = loaded
                                                                 currentIndex = -1
                                                                 showLoadPlaylist = false
+                                                                savePlaylistToPrefs(loaded)
+                                                                statePrefs.edit()
+                                                                    .remove("current_index")
+                                                                    .remove("saved_position_ms")
+                                                                    .apply()
                                                                 Toast.makeText(
                                                                     this@MainActivity,
                                                                     "Loaded \"${item.name}\" — ${loaded.size} tracks",
@@ -551,6 +615,11 @@ class MainActivity : ComponentActivity() {
                                             showMenu = false
                                             val tracks = scanMediaStore()
                                             playlist = tracks
+                                            savePlaylistToPrefs(tracks)
+                                            statePrefs.edit()
+                                                .remove("current_index")
+                                                .remove("saved_position_ms")
+                                                .apply()
                                             Toast.makeText(
                                                 this@MainActivity,
                                                 "Found ${tracks.size} tracks",
@@ -657,6 +726,11 @@ class MainActivity : ComponentActivity() {
                                             if (isBound) {
                                                 if (isPlaying) {
                                                     playbackService?.getEngine()?.pause()
+                                                    // Save position on pause for audiobook resume
+                                                    statePrefs.edit()
+                                                        .putFloat("saved_position_ms", progressMs)
+                                                        .putInt("current_index", currentIndex)
+                                                        .apply()
                                                 } else if (currentTrack != null) {
                                                     playbackService?.getEngine()?.play()
                                                 } else if (playlist.isNotEmpty()) {
@@ -754,9 +828,13 @@ class MainActivity : ComponentActivity() {
                                     currentIndex = -1
                                     isPlaying = false
                                     progressMs = 0f
-                                    // Clear played progress for audiobooks (explicit user action)
                                     playedUris = emptySet()
                                     prefs.edit().remove("played_uris").apply()
+                                    statePrefs.edit()
+                                        .remove("playlist_json")
+                                        .remove("current_index")
+                                        .remove("saved_position_ms")
+                                        .apply()
                                 }) {
                                     Text("Clear", style = MaterialTheme.typography.labelSmall)
                                 }
