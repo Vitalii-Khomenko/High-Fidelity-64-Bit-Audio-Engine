@@ -1,7 +1,13 @@
 {
   "permissions": {
     "allow": [
-      "Bash(./gradlew assembleDebug)"
+      "Bash(./gradlew assembleDebug)",
+      "Read(//c/tmp/**)",
+      "Bash(cp ~/.gradle/caches/modules-2/files-2.1/androidx.media/media/1.6.0/db8f393321275a13f52eb5ff28f96931f238865e/media-1.6.0.aar .)",
+      "Bash(jar tf:*)",
+      "Bash(jar xf:*)",
+      "Bash(unzip -p media-1.6.0.aar classes.jar)",
+      "Bash(unzip -p classes.jar)"
     ]
   }
 }
