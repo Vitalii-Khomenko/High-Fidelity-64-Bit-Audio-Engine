@@ -1,5 +1,6 @@
-﻿*.cxx
+*.cxx
 *.iml
+*.hprof
 .gradle
 local.properties
 .idea/

@@ -1,111 +1,150 @@
 #pragma once
 
+#include <atomic>
 #include <vector>
-#include <string>
 #include <memory>
-#include <iostream>
+#include <android/log.h>
 #include <oboe/Oboe.h>
 
 #include "../core/RingBuffer.h"
-#include "../dsp/DitherProcessor.h"
+
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "AudioEngine", __VA_ARGS__)
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  "AudioEngine", __VA_ARGS__)
 
 namespace audio_engine {
 namespace hw {
 
 /**
- * @brief Oboe Audio Endpoint for High-Fidelity Android Audio Output.
+ * @brief Oboe Audio Endpoint — long-lived stream.
  *
- * Uses Google's Oboe library to achieve the lowest possible latency and
- * exclusive hardware access (AAudio EXCLUSIVE mode) on modern Android devices.
+ * The stream is created ONCE (in initialize()) and kept alive for the entire
+ * duration of the engine.  It is never closed between tracks.  The
+ * onAudioReady callback simply outputs silence when the ring buffer is empty,
+ * so there is no need to start / stop the stream per-track.
+ *
+ * terminate() is only called during engine shutdown.
  */
 class OboeAudioEndpoint : public oboe::AudioStreamCallback {
 public:
-    /**
-     * @brief Construct the endpoint linked to a specific DSP RingBuffer.
-     * @param ringBuffer The ring buffer containing 64-bit float interleaved samples.
-     */
-    OboeAudioEndpoint(core::RingBuffer<double>* ringBuffer) 
-        : m_ringBuffer(ringBuffer), m_stream(nullptr), m_isPlaying(false) {
-    }
+    explicit OboeAudioEndpoint(core::RingBuffer<double>* ringBuffer)
+        : m_ringBuffer(ringBuffer), m_stream(nullptr), m_streamRunning(false) {}
 
     ~OboeAudioEndpoint() {
         terminate();
     }
 
+    /**
+     * Open and START the Oboe stream.
+     * Should be called once.  If called a second time with different
+     * parameters, it closes the previous stream first.
+     */
     bool initialize(uint32_t sampleRate, size_t numChannels) {
+        // Close existing stream if parameters changed or not yet opened
+        if (m_stream) {
+            if (m_stream->getSampleRate() == static_cast<int32_t>(sampleRate) &&
+                m_stream->getChannelCount() == static_cast<int32_t>(numChannels) &&
+                m_streamRunning) {
+                // Reuse existing stream — just clear old audio data
+                return true;
+            }
+            terminateInternal();
+        }
+
         oboe::AudioStreamBuilder builder;
         builder.setDirection(oboe::Direction::Output)
-               ->setPerformanceMode(oboe::PerformanceMode::None)
+               ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
                ->setSharingMode(oboe::SharingMode::Shared)
-               ->setFormat(oboe::AudioFormat::Float) // Let Oboe mix 32-bit floats
-               ->setChannelCount(numChannels)
-               ->setSampleRate(sampleRate)
+               ->setFormat(oboe::AudioFormat::Float)
+               ->setChannelCount(static_cast<int>(numChannels))
+               ->setSampleRate(static_cast<int>(sampleRate))
                ->setCallback(this);
 
         oboe::Result result = builder.openStream(m_stream);
-        
         if (result != oboe::Result::OK) {
-            std::cerr << "Failed to create Oboe audio stream. Error: " << oboe::convertToText(result) << std::endl;
+            LOGE("Oboe openStream failed: %s", oboe::convertToText(result));
+            m_stream = nullptr;
             return false;
         }
 
-        m_numChannels = m_stream->getChannelCount();
-        m_tempBuffer.resize(8192 * m_numChannels, 0.0); // Pre-allocate scratch buffer
+        m_numChannels = static_cast<size_t>(m_stream->getChannelCount());
+        m_tempBuffer.resize(8192 * m_numChannels, 0.0);
+
+        result = m_stream->requestStart();
+        if (result != oboe::Result::OK) {
+            LOGE("Oboe requestStart failed: %s", oboe::convertToText(result));
+            m_stream->close();
+            m_stream = nullptr;
+            return false;
+        }
+
+        m_streamRunning = true;
+        LOGI("Oboe stream started: %d Hz, %zu ch", sampleRate, numChannels);
         return true;
     }
 
-    void startHardwareThread() {
-        if (m_stream && !m_isPlaying) {
-            m_isPlaying = true;
-            m_stream->requestStart();
-        }
-    }
-
-    void terminate() {
-        if (m_stream) {
-            m_stream->requestStop();
-            m_stream->close();
-            m_stream.reset();
-        }
-        m_isPlaying = false;
-    }
-
     /**
-     * @brief Oboe Callback: Pulled from the hardware audio thread.
+     * Full shutdown — stop and close the stream.
+     * Only call this when the engine is being destroyed.
      */
-    oboe::DataCallbackResult onAudioReady(oboe::AudioStream *audioStream, void *audioData, int32_t numFrames) override {
-        // We asked Oboe for Float.
-        float* outBuffer = static_cast<float*>(audioData);
-        size_t samplesNeeded = numFrames * m_numChannels;
-        
-        // Ensure our temp buffer can hold the chunk (safe check, shouldn't allocate in RT)
+    void terminate() {
+        terminateInternal();
+    }
+
+    bool isInitialized() const { return m_stream != nullptr; }
+    bool isRunning()     const { return m_streamRunning.load(); }
+
+    int32_t getStreamSampleRate()    const { return m_stream ? m_stream->getSampleRate()    : 0; }
+    int32_t getStreamChannelCount()  const { return m_stream ? m_stream->getChannelCount()  : 0; }
+
+    // ------------------------------------------------------------------ //
+    //  Oboe real-time callback                                            //
+    // ------------------------------------------------------------------ //
+    oboe::DataCallbackResult onAudioReady(oboe::AudioStream* /*stream*/,
+                                          void* audioData,
+                                          int32_t numFrames) override {
+        float* out = static_cast<float*>(audioData);
+        size_t samplesNeeded = static_cast<size_t>(numFrames) * m_numChannels;
+
         if (samplesNeeded > m_tempBuffer.size()) {
-            // Ideally avoid allocations in real-time, just play what we can
-            samplesNeeded = m_tempBuffer.size(); 
+            samplesNeeded = m_tempBuffer.size();
         }
 
-        // Pull double-precision samples from our Lock-Free RingBuffer
         size_t samplesRead = m_ringBuffer->read(m_tempBuffer.data(), samplesNeeded);
 
-        // Fill remaining with silence if underrun
+        // Silence for any underrun samples
         for (size_t i = samplesRead; i < samplesNeeded; ++i) {
             m_tempBuffer[i] = 0.0;
         }
 
-        // Simple downcast from 64-bit float to 32-bit float for Oboe
+        // Downcast 64-bit → 32-bit float for Oboe
         for (size_t i = 0; i < samplesNeeded; ++i) {
-            outBuffer[i] = static_cast<float>(m_tempBuffer[i]);
+            out[i] = static_cast<float>(m_tempBuffer[i]);
         }
 
         return oboe::DataCallbackResult::Continue;
     }
 
+    void onErrorAfterClose(oboe::AudioStream* /*stream*/, oboe::Result error) override {
+        LOGE("Oboe stream error after close: %s", oboe::convertToText(error));
+        m_streamRunning = false;
+    }
+
 private:
-    core::RingBuffer<double>* m_ringBuffer;
+    void terminateInternal() {
+        if (m_stream) {
+            // Synchronous stop — waits for any in-flight callback to finish
+            m_stream->stop();
+            m_stream->close();
+            m_stream = nullptr;
+        }
+        m_streamRunning = false;
+    }
+
+    core::RingBuffer<double>*         m_ringBuffer;
     std::shared_ptr<oboe::AudioStream> m_stream;
-    bool m_isPlaying;
-    size_t m_numChannels = 2;
-    std::vector<double> m_tempBuffer;
+    std::atomic<bool>                  m_streamRunning{false};
+    size_t                             m_numChannels{2};
+    std::vector<double>                m_tempBuffer;
 };
 
 } // namespace hw
