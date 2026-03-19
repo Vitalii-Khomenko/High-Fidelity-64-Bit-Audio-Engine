@@ -274,7 +274,7 @@ class PlaybackService : Service() {
         val stopIntent = MediaButtonReceiver.buildMediaButtonPendingIntent(
             this, PlaybackStateCompat.ACTION_STOP)
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(title.ifEmpty { "MusicPlayerPro" })
+            .setContentTitle(title.ifEmpty { "HiFi Player" })
             .setContentText("64-bit Hi-Fi Engine")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentIntent(openIntent)

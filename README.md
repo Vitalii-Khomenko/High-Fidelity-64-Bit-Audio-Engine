@@ -1,125 +1,142 @@
-# High-Fidelity 64-Bit Audio Engine — Android Music Player
+# HiFi Player — 64-Bit Hi-Fi Audio Engine for Android
 
-An audiophile-grade, bit-perfect music player for Android built entirely in C/C++ with a Jetpack Compose UI.  Unlike standard players that rely on the Android OS Mixer (AudioFlinger) and its forced 48 kHz resampling, this engine communicates directly with the DAC via Google's **Oboe** framework.
+A professional-grade music player for Android built on a fully custom 64-bit C++ audio engine. Designed for audiophiles, audiobook listeners, and anyone who cares about sound quality.
+
+---
+
+## Features
+
+### Audio Engine
+- **64-bit double-precision DSP pipeline** — all signal processing runs at full `double` precision before being downsampled to 32-bit float for output
+- **Oboe audio backend** — low-latency stream stays alive between tracks (no close/reopen per track), eliminating dropouts and timing issues
+- **Lock-free ring buffer** — decode thread and audio callback communicate via a power-of-2 ring buffer with no mutexes on the hot path
+- **Variable playback speed** — real-time pitch-transparent speed control with linear interpolation in the decode loop
+- **Volume control** — anti-zipper smoothing via `GainProcessor`
+- **Parametric EQ** — `BiquadFilter` implementing all 7 RBJ EQ Cookbook filter types: LowPass, HighPass, BandPass, Notch, AllPass, LowShelf, HighShelf
+
+### Supported Formats
+| Format | Decoder | Notes |
+|--------|---------|-------|
+| MP3    | dr_mp3  | CBR and VBR (Xing/Info header optional) |
+| FLAC   | dr_flac | Lossless, up to 32-bit/192 kHz |
+| WAV    | dr_wav  | PCM and IEEE float |
+| DSD    | stub    | Architecture stub — full libusb integration pending |
+
+### Android Integration
+- **Foreground service** (`PlaybackService`) keeps audio running when the app is in the background
+- **MediaSession + MediaStyle notification** — lock-screen and notification-shade controls with Previous / Play-Pause / Next buttons
+- **Hardware media button support** — headset buttons, Bluetooth remotes, and car audio controls all work via `MediaButtonReceiver`
+- **Audio focus** — automatically pauses on phone calls and other audio interruptions, resumes when focus is regained
+- **Notification progress bar** — auto-advances without polling using `SystemClock.elapsedRealtime()` and playback speed metadata
+- **Async track loading** — file scanning and decoder initialization run on `Dispatchers.IO` with a `Mutex` preventing race conditions; the UI never freezes
+
+### Playlist & Audiobook Features
+- **Persistent played-track tracking** — tracks you've listened to are highlighted in the playlist with a green check mark; state survives app restarts (stored in SharedPreferences by URI)
+- **Clear progress** — one tap resets the audiobook progress markers
+- **State restoration** — current track is restored after Activity recreation (rotation, background kill)
+- **Playlist management** — create, load, and manage playlists backed by a Room database
+- **Auto-advance** — automatically plays the next track when one finishes
+
+### USB Audio (Architecture Stub)
+- `UsbAudioEndpoint` defines the architecture for bypassing Android's mixer (which resamples to 48 kHz) and streaming raw PCM or DoP packets directly to a USB DAC via libusb isochronous transfers
+- Requires `UsbManager` permission grant in Java + fd passed to native via JNI
 
 ---
 
 ## Architecture
 
 ```
-Jetpack Compose UI
-        │
-        ▼
- PlaybackService (Foreground, MediaSession)
-        │
-        ▼
-  AudioEngine.kt  ──JNI──▶  audio_engine_jni.cpp
-                                    │
-                                    ▼
-                            AudioPlayer (C++)
-                            ├── Decode Thread
-                            │     ├── FLAC (dr_flac)
-                            │     ├── MP3  (dr_mp3)
-                            │     └── WAV  (dr_wav)
-                            │
-                            ├── Lock-Free RingBuffer<double>  (64-bit)
-                            │
-                            ├── DSP Pipeline
-                            │     ├── GainProcessor  (anti-zipper volume)
-                            │     └── BiquadFilter   (parametric EQ)
-                            │
-                            └── OboeAudioEndpoint
-                                  └── Oboe → Hardware DAC (Float32)
+┌─────────────────────────────────────────────────────┐
+│                  Android UI Layer                    │
+│  MainActivity (Jetpack Compose) + PlaybackService    │
+│  MediaSessionCompat · AudioFocus · Notification      │
+└───────────────────┬─────────────────────────────────┘
+                    │ JNI (audio_engine_jni.cpp)
+┌───────────────────▼─────────────────────────────────┐
+│                  C++ Audio Engine                    │
+│                                                      │
+│  IAudioDecoder ──► AudioPlayer ──► RingBuffer<double>│
+│  (Mp3/Flac/Wav)    decode thread    lock-free        │
+│                    DSP chain                         │
+│                    GainProcessor                     │
+│                    BiquadFilter                      │
+└───────────────────┬─────────────────────────────────┘
+                    │ Oboe callback
+┌───────────────────▼─────────────────────────────────┐
+│             OboeAudioEndpoint                        │
+│  Long-lived stream · double→float · underrun silence │
+└─────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Key Features
+## Technical Notes
 
-### Audio Engine
-| Feature | Detail |
-|---|---|
-| **Bit depth** | Full 64-bit `double` pipeline internally; 32-bit `float` to Oboe |
-| **Formats** | FLAC, MP3, WAV (auto-detected from file content, not extension) |
-| **Sample rates** | Source-native (44.1 / 48 / 88.2 / 96 / 192 kHz) |
-| **Stream lifecycle** | Oboe stream is created **once** and kept alive; never closed between tracks — eliminates timing/resource bugs |
-| **Speed control** | 0.25× – 4.0× with linear interpolation resampling |
-| **Volume** | Anti-zipper gain smoothing (no click artefacts) |
-| **Seeking** | Atomic seek-request model; safe across decode/audio threads |
-| **Ring buffer** | Lock-free power-of-2 buffer; back-pressure aware decode loop |
-| **TPDF Dither** | Mathematically fast dithering before bit-depth reduction |
-| **Threading** | Decode thread + Oboe real-time callback thread; mutex-guarded decoder access |
+### MP3 VBR Fix
+Variable-bitrate MP3 files without an Xing/Info header caused tracks to stop after ~1 second. Root cause: `drmp3_get_pcm_frame_count()` scans the entire file, leaving the file offset at EOF. `drmp3_seek_to_pcm_frame(0)` silently fails for such files. Fix: after frame-count scan, call `drmp3_uninit()`, `lseek(fd, 0, SEEK_SET)`, then `drmp3_init()` again for playback.
 
-### Android Integration
-| Feature | Detail |
-|---|---|
-| **Scoped Storage** | File Descriptor passed natively via `/proc/self/fd/X` (Android 11+ compatible) |
-| **Foreground Service** | `MediaSessionCompat` + notification with track title |
-| **Audio Focus** | Full GAIN / LOSS / LOSS_TRANSIENT / DUCK handling; auto-resume only on transient interruptions (phone call, navigation) — never on user Stop |
-| **Ghost playback prevention** | `START_NOT_STICKY` + `pausedByFocusLoss` flag; stopping playback releases audio focus and removes notification |
-| **Playlists** | Room database with create / rename / delete / load |
-| **Sleep Timer** | Countdown with 30-second fade-out |
-| **Folder scan** | `DocumentsContract` tree picker with persisted URI permissions |
+### Oboe Stream Lifecycle
+The Oboe stream is created once when the engine is initialized and kept alive for the entire session. Between tracks, only the decoder is swapped out. This avoids the latency, resource exhaustion, and timing bugs that occur when closing and reopening a stream for each track.
 
-### UI (Jetpack Compose)
-- Transport controls: Play/Pause, Stop (resets to beginning), Previous, Next
-- Seek bar with real-time position / duration display
-- Speed selector (0.5× / 0.75× / 1× / 1.25× / 1.5× / 2×)
-- Volume slider
-- Track info: title, sample rate (kHz), bit depth
-- Playlist with now-playing indicator
-- Dark/light Material 3 theme
+### Double-Tap / Race Condition Prevention
+`isLoadingTrack` in the UI debounces rapid track selections. `loadMutex` (Kotlin coroutine `Mutex`) in `PlaybackService` serializes concurrent JNI decoder loads so only one native operation runs at a time even if the user taps quickly.
 
 ---
 
-## Building
+## Build Requirements
 
-```bash
-# Prerequisites: Android Studio Hedgehog+, NDK r25+, CMake 3.22+
-./gradlew assembleDebug
-```
+- Android Studio Hedgehog or later
+- NDK r25c or later (C++17)
+- `minSdk 26` (Android 8.0) — required for `AudioFocusRequest` API
+- `targetSdk 35`
+- Gradle 8.x
 
-Gradle pulls Jetpack Compose and the Oboe C++ framework automatically.  CMake compiles the NDK native library.
-
-Output APK: `app/build/outputs/apk/debug/app-debug.apk`
+### Dependencies
+- Oboe (audio HAL, included via CMake `find_package`)
+- dr_libs (dr_mp3, dr_flac, dr_wav — single-header, included in `src/decoders/`)
+- AndroidX Media (`androidx.media:media:1.6.0`) — MediaSessionCompat, MediaButtonReceiver
+- Jetpack Compose + Material3
+- Room (playlist database)
 
 ---
 
-## File Structure
+## Project Structure
 
 ```
-app/src/main/
-├── java/com/aiproject/musicplayer/
-│   ├── AudioEngine.kt          # JNI bridge
-│   ├── PlaybackService.kt      # Foreground service + MediaSession + AudioFocus
-│   └── MainActivity.kt         # Jetpack Compose UI
-└── cpp/  (via CMakeLists.txt)
-    src/
+MusicPlayerPro/
+├── app/src/main/
+│   ├── java/com/aiproject/musicplayer/
+│   │   ├── MainActivity.kt          # Compose UI, playlist, playback controls
+│   │   ├── PlaybackService.kt       # Foreground service, MediaSession, audio focus
+│   │   ├── AudioEngine.kt           # Kotlin JNI wrapper
+│   │   └── db/                      # Room database (playlists)
+│   ├── res/
+│   │   ├── drawable/                # ic_launcher_foreground/background (equalizer icon)
+│   │   ├── mipmap-anydpi-v26/       # Adaptive icon
+│   │   └── values/                  # strings.xml, themes.xml
+│   └── AndroidManifest.xml
+└── src/
     ├── core/
-    │   ├── AudioPlayer.h       # Main engine: decode thread, DSP, transport
-    │   ├── RingBuffer.h        # Lock-free ring buffer (template)
-    │   └── AudioBuffer.h       # Multi-channel sample buffer
-    ├── hw/
-    │   └── OboeAudioEndpoint.h # Oboe stream + real-time callback
-    ├── dsp/
-    │   ├── GainProcessor.h     # Volume with anti-zipper smoothing
-    │   └── BiquadFilter.h      # Parametric EQ (IIR biquad)
+    │   └── AudioPlayer.h            # Main engine: decoder + DSP + ring buffer
     ├── decoders/
-    │   ├── IAudioDecoder.h     # Decoder interface
-    │   ├── FlacDecoder.h       # FLAC via dr_flac (single-header)
-    │   ├── Mp3Decoder.h        # MP3  via dr_mp3  (single-header)
-    │   └── WavDecoder.h        # WAV  via dr_wav  (single-header)
+    │   ├── IAudioDecoder.h
+    │   ├── Mp3Decoder.h
+    │   ├── FlacDecoder.h
+    │   ├── WavDecoder.h
+    │   └── DsdDecoder.h
+    ├── dsp/
+    │   ├── GainProcessor.h
+    │   └── BiquadFilter.h
+    ├── hw/
+    │   ├── IAudioEndpoint.h
+    │   ├── OboeAudioEndpoint.h
+    │   └── UsbAudioEndpoint.h       # Architecture stub
     └── jni/
         └── audio_engine_jni.cpp
 ```
 
 ---
 
-## Why not AudioTrack / ExoPlayer?
+## License
 
-Standard Android audio paths (AudioTrack, MediaPlayer, ExoPlayer) all route through **AudioFlinger**, the OS audio mixer, which:
-- Resamples everything to 48 kHz (quality loss)
-- Mixes in 16-bit integer arithmetic (precision loss)
-- Adds 20–200 ms latency
-
-This engine uses **Oboe in Shared mode** with Float32 output and source-native sample rates, keeping the full precision of the original file all the way to the DAC.
+MIT License — see [LICENSE](LICENSE) for details.

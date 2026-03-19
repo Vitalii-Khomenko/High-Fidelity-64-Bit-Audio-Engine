@@ -522,7 +522,7 @@ class MainActivity : ComponentActivity() {
                 Scaffold(
                     topBar = {
                         TopAppBar(
-                            title = { Text("64-Bit Audiophile Player") },
+                            title = { Text("HiFi Player") },
                             actions = {
                                 // Sleep timer indicator
                                 if (sleepTimerDisplay.isNotEmpty()) {
