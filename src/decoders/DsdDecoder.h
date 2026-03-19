@@ -105,7 +105,8 @@ public:
             }
             actualFramesRead++;
         }
-        
+
+        m_currentFrame += actualFramesRead;
         return actualFramesRead;
     }
 
@@ -113,12 +114,23 @@ public:
      * @brief PCM output sample rate post-decimation.
      * E.g., DSD64 (2822400 Hz) Decimated by 8 = 352800 Hz.
      */
-    uint32_t getSampleRate() const override { 
-        return m_sampleRate / 8; 
+    uint32_t getSampleRate() const override {
+        return m_isOpen ? m_sampleRate / 8 : 0;
     }
-    
-    size_t getNumChannels() const override { return m_numChannels; }
-    uint64_t getTotalFrames() const override { return m_totalFrames; }
+
+    size_t   getNumChannels()   const override { return m_numChannels; }
+    uint64_t getTotalFrames()   const override { return m_totalFrames; }
+    uint64_t getCurrentFrame()  const override { return m_currentFrame; }
+    uint32_t getBitsPerSample() const override { return 1; } // DSD is 1-bit PCM
+
+    bool seekToFrame(uint64_t targetFrame) override {
+        if (!m_isOpen) return false;
+        // Seek relative to data start: each frame = 1 byte per channel
+        std::streamoff byteOffset = static_cast<std::streamoff>(targetFrame * m_numChannels);
+        m_file.seekg(static_cast<std::streamoff>(m_dataStart) + byteOffset, std::ios::beg);
+        m_currentFrame = targetFrame;
+        return !m_file.fail();
+    }
 
     /**
      * @brief Toggle DoP (DSD over PCM) standard mode.
@@ -134,6 +146,7 @@ private:
     uint32_t m_sampleRate;
     size_t m_numChannels;
     uint64_t m_totalFrames;
+    uint64_t m_currentFrame = 0;
     std::streampos m_dataStart;
     bool m_dopMode;
 };

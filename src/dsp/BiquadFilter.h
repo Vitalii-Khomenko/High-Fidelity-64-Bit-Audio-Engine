@@ -110,16 +110,61 @@ private:
                 m_a1 = -2.0 * std::cos(w0);
                 m_a2 = 1.0 - alpha;
                 break;
-            case FilterType::Peak:
-                m_b0 = 1.0 + alpha * A;
-                m_b1 = -2.0 * std::cos(w0);
-                m_b2 = 1.0 - alpha * A;
-                m_a0 = 1.0 + alpha / A;
+            case FilterType::HighPass:
+                m_b0 =  (1.0 + std::cos(w0)) / 2.0;
+                m_b1 = -(1.0 + std::cos(w0));
+                m_b2 =  (1.0 + std::cos(w0)) / 2.0;
+                m_a0 =  1.0 + alpha;
                 m_a1 = -2.0 * std::cos(w0);
-                m_a2 = 1.0 - alpha / A;
+                m_a2 =  1.0 - alpha;
                 break;
-            // TODO: Other filter types
+            case FilterType::BandPass:
+                // Constant 0 dB peak gain (RBJ cookbook)
+                m_b0 =  alpha;
+                m_b1 =  0.0;
+                m_b2 = -alpha;
+                m_a0 =  1.0 + alpha;
+                m_a1 = -2.0 * std::cos(w0);
+                m_a2 =  1.0 - alpha;
+                break;
+            case FilterType::Notch:
+                m_b0 =  1.0;
+                m_b1 = -2.0 * std::cos(w0);
+                m_b2 =  1.0;
+                m_a0 =  1.0 + alpha;
+                m_a1 = -2.0 * std::cos(w0);
+                m_a2 =  1.0 - alpha;
+                break;
+            case FilterType::Peak:
+                m_b0 =  1.0 + alpha * A;
+                m_b1 = -2.0 * std::cos(w0);
+                m_b2 =  1.0 - alpha * A;
+                m_a0 =  1.0 + alpha / A;
+                m_a1 = -2.0 * std::cos(w0);
+                m_a2 =  1.0 - alpha / A;
+                break;
+            case FilterType::LowShelf: {
+                double sqrtA = std::sqrt(A);
+                m_b0 =  A * ((A + 1.0) - (A - 1.0) * std::cos(w0) + 2.0 * sqrtA * alpha);
+                m_b1 =  2.0 * A * ((A - 1.0) - (A + 1.0) * std::cos(w0));
+                m_b2 =  A * ((A + 1.0) - (A - 1.0) * std::cos(w0) - 2.0 * sqrtA * alpha);
+                m_a0 =       (A + 1.0) + (A - 1.0) * std::cos(w0) + 2.0 * sqrtA * alpha;
+                m_a1 = -2.0 * ((A - 1.0) + (A + 1.0) * std::cos(w0));
+                m_a2 =       (A + 1.0) + (A - 1.0) * std::cos(w0) - 2.0 * sqrtA * alpha;
+                break;
+            }
+            case FilterType::HighShelf: {
+                double sqrtA = std::sqrt(A);
+                m_b0 =  A * ((A + 1.0) + (A - 1.0) * std::cos(w0) + 2.0 * sqrtA * alpha);
+                m_b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * std::cos(w0));
+                m_b2 =  A * ((A + 1.0) + (A - 1.0) * std::cos(w0) - 2.0 * sqrtA * alpha);
+                m_a0 =       (A + 1.0) - (A - 1.0) * std::cos(w0) + 2.0 * sqrtA * alpha;
+                m_a1 =  2.0 * ((A - 1.0) - (A + 1.0) * std::cos(w0));
+                m_a2 =       (A + 1.0) - (A - 1.0) * std::cos(w0) - 2.0 * sqrtA * alpha;
+                break;
+            }
             default:
+                // Bypass (identity)
                 m_b0 = 1.0; m_b1 = 0.0; m_b2 = 0.0;
                 m_a0 = 1.0; m_a1 = 0.0; m_a2 = 0.0;
         }
