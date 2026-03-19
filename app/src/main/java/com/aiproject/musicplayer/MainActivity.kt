@@ -102,6 +102,9 @@ class MainActivity : ComponentActivity() {
                 var speedMult by remember { mutableFloatStateOf(1.0f) }
                 var sampleRateKhz by remember { mutableStateOf("") }
                 var bitDepth by remember { mutableStateOf("") }
+                // Tracks that have been played at least once in this session
+                // (used to show a "read" indicator — useful for audiobooks)
+                var playedIndices by remember { mutableStateOf(setOf<Int>()) }
 
                 // Menu / Dialog state
                 var showMenu by remember { mutableStateOf(false) }
@@ -124,11 +127,31 @@ class MainActivity : ComponentActivity() {
                     if (index !in playlist.indices) return
                     currentIndex = index
                     isPlaying = true   // optimistic: engine confirms via poll loop
+                    playedIndices = playedIndices + index   // mark as played
                     val track = playlist[index]
                     if (isBound) {
                         playbackService?.playTrack(track.uri, this@MainActivity, track.name)
                         playbackService?.setPlaybackSpeed(speedMult.toDouble())
                         playbackService?.setVolume(volume.toDouble())
+                    }
+                }
+
+                // Wire up notification skip buttons — updated after every composition
+                // so they always capture the latest currentIndex / playlist.
+                SideEffect {
+                    if (isBound) {
+                        playbackService?.skipToNextCallback = {
+                            val next = currentIndex + 1
+                            if (next in playlist.indices) {
+                                lifecycleScope.launch(Dispatchers.Main) { playAtIndex(next) }
+                            }
+                        }
+                        playbackService?.skipToPreviousCallback = {
+                            val prev = currentIndex - 1
+                            if (prev >= 0) {
+                                lifecycleScope.launch(Dispatchers.Main) { playAtIndex(prev) }
+                            }
+                        }
                     }
                 }
 
@@ -346,6 +369,7 @@ class MainActivity : ComponentActivity() {
                                                             lifecycleScope.launch(Dispatchers.Main) {
                                                                 playlist = loaded
                                                                 currentIndex = -1
+                                                                playedIndices = emptySet()
                                                                 showLoadPlaylist = false
                                                                 Toast.makeText(
                                                                     this@MainActivity,
@@ -684,6 +708,7 @@ class MainActivity : ComponentActivity() {
                                     currentIndex = -1
                                     isPlaying = false
                                     progressMs = 0f
+                                    playedIndices = emptySet()
                                 }) {
                                     Text("Clear", style = MaterialTheme.typography.labelSmall)
                                 }
@@ -714,6 +739,27 @@ class MainActivity : ComponentActivity() {
                             LazyColumn(modifier = Modifier.weight(1f)) {
                                 itemsIndexed(playlist) { index, track ->
                                     val isCurrentTrack = index == currentIndex
+                                    val isPlayed = index in playedIndices && !isCurrentTrack
+
+                                    // Color scheme:
+                                    //  • Current track  → primary (blue)
+                                    //  • Played track   → tertiary dimmed (green-ish = "done")
+                                    //  • Unplayed track → default onSurface
+                                    val textColor = when {
+                                        isCurrentTrack -> MaterialTheme.colorScheme.primary
+                                        isPlayed       -> MaterialTheme.colorScheme.tertiary.copy(alpha = 0.75f)
+                                        else           -> MaterialTheme.colorScheme.onSurface
+                                    }
+                                    val rowBackground = when {
+                                        isCurrentTrack -> Modifier.background(
+                                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+                                        )
+                                        isPlayed       -> Modifier.background(
+                                            MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.15f)
+                                        )
+                                        else           -> Modifier
+                                    }
+
                                     ListItem(
                                         headlineContent = {
                                             Text(
@@ -721,20 +767,24 @@ class MainActivity : ComponentActivity() {
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis,
                                                 fontWeight = if (isCurrentTrack) FontWeight.Bold else FontWeight.Normal,
-                                                color = if (isCurrentTrack) MaterialTheme.colorScheme.primary
-                                                        else MaterialTheme.colorScheme.onSurface
+                                                color = textColor
                                             )
                                         },
                                         leadingContent = {
-                                            if (isCurrentTrack && isPlaying) {
-                                                Icon(
+                                            when {
+                                                isCurrentTrack && isPlaying -> Icon(
                                                     Icons.AutoMirrored.Filled.VolumeUp,
                                                     contentDescription = "Playing",
                                                     tint = MaterialTheme.colorScheme.primary,
                                                     modifier = Modifier.size(20.dp)
                                                 )
-                                            } else {
-                                                Text(
+                                                isPlayed -> Icon(
+                                                    Icons.Filled.CheckCircle,
+                                                    contentDescription = "Played",
+                                                    tint = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.6f),
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                                else -> Text(
                                                     "${index + 1}",
                                                     style = MaterialTheme.typography.labelSmall,
                                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
@@ -744,13 +794,7 @@ class MainActivity : ComponentActivity() {
                                         },
                                         modifier = Modifier
                                             .clickable { playAtIndex(index) }
-                                            .then(
-                                                if (isCurrentTrack)
-                                                    Modifier.background(
-                                                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
-                                                    )
-                                                else Modifier
-                                            )
+                                            .then(rowBackground)
                                     )
                                     HorizontalDivider(thickness = 0.5.dp)
                                 }

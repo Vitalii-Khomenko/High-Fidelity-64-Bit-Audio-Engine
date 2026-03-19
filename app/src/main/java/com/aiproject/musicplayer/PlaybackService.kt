@@ -1,5 +1,6 @@
 package com.aiproject.musicplayer
 
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -15,9 +16,11 @@ import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.support.v4.media.MediaMetadataCompat
+import androidx.media.session.MediaButtonReceiver
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
+import androidx.media.app.NotificationCompat as MediaNotificationCompat
 
 class PlaybackService : Service() {
     private val binder = LocalBinder()
@@ -35,6 +38,10 @@ class PlaybackService : Service() {
      */
     private var pausedByFocusLoss = false
 
+    /** Callbacks wired by MainActivity after binding — handle playlist navigation. */
+    var skipToNextCallback: (() -> Unit)? = null
+    var skipToPreviousCallback: (() -> Unit)? = null
+
     fun getEngine(): AudioEngine = audioEngine
 
     inner class LocalBinder : Binder() {
@@ -51,12 +58,10 @@ class PlaybackService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Show foreground notification only if we have an active track
-        if (currentTitle.isNotEmpty()) {
-            showNotification(currentTitle)
-        }
+        // Let MediaButtonReceiver handle hardware media button events
+        MediaButtonReceiver.handleIntent(mediaSession, intent)
+        if (currentTitle.isNotEmpty()) showNotification(currentTitle, audioEngine.isPlaying())
         // START_NOT_STICKY: do NOT auto-restart the service if Android kills it.
-        // This prevents ghost playback after the user explicitly stopped the app.
         return START_NOT_STICKY
     }
 
@@ -68,6 +73,7 @@ class PlaybackService : Service() {
                         pausedByFocusLoss = false
                         audioEngine.play()
                         updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
+                        if (currentTitle.isNotEmpty()) showNotification(currentTitle, true)
                     }
                 }
 
@@ -76,14 +82,20 @@ class PlaybackService : Service() {
                     audioEngine.pause()
                     updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
                     abandonAudioFocus()
+                    if (currentTitle.isNotEmpty()) showNotification(currentTitle, false)
                 }
 
                 override fun onStop() {
                     stopPlayback()
                 }
 
-                override fun onSkipToNext() { /* Handled by MainActivity */ }
-                override fun onSkipToPrevious() { /* Handled by MainActivity */ }
+                override fun onSkipToNext() {
+                    skipToNextCallback?.invoke()
+                }
+
+                override fun onSkipToPrevious() {
+                    skipToPreviousCallback?.invoke()
+                }
 
                 override fun onSeekTo(pos: Long) {
                     audioEngine.seekTo(pos.toDouble())
@@ -95,9 +107,6 @@ class PlaybackService : Service() {
 
     /**
      * Called when the user explicitly presses Stop.
-     * Stops audio, resets position, releases audio focus, removes the
-     * foreground notification.  Does NOT kill the service (still needed for
-     * binding) and does NOT set a restart flag.
      */
     fun stopPlayback() {
         pausedByFocusLoss = false
@@ -105,14 +114,13 @@ class PlaybackService : Service() {
         audioEngine.seekTo(0.0)
         abandonAudioFocus()
         updatePlaybackState(PlaybackStateCompat.STATE_STOPPED)
-        // Remove the persistent notification — user explicitly stopped
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
     fun playTrack(uri: Uri, context: Context, title: String) {
         currentTitle = title
-        pausedByFocusLoss = false   // user explicitly chose a track
-        requestAudioFocus()         // always request; both branches play
+        pausedByFocusLoss = false
+        requestAudioFocus()
         audioEngine.playTrack(uri, context)
 
         val metadata = MediaMetadataCompat.Builder()
@@ -120,7 +128,7 @@ class PlaybackService : Service() {
             .build()
         mediaSession.setMetadata(metadata)
         updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
-        showNotification(title)
+        showNotification(title, true)
     }
 
     fun setPlaybackSpeed(speed: Double) { audioEngine.setSpeed(speed) }
@@ -138,35 +146,31 @@ class PlaybackService : Service() {
                 .setOnAudioFocusChangeListener { focusChange ->
                     when (focusChange) {
                         AudioManager.AUDIOFOCUS_LOSS -> {
-                            // Permanent loss (another app took over) — stop; user must
-                            // press Play again if they want to resume.
                             pausedByFocusLoss = false
                             audioEngine.pause()
                             updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
+                            if (currentTitle.isNotEmpty()) showNotification(currentTitle, false)
                             abandonAudioFocus()
                         }
                         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                            // Brief interruption (phone call, navigation voice) —
-                            // remember so we can auto-resume on GAIN.
                             if (audioEngine.isPlaying()) {
                                 pausedByFocusLoss = true
                                 audioEngine.pause()
                                 updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
+                                if (currentTitle.isNotEmpty()) showNotification(currentTitle, false)
                             }
                         }
                         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                             audioEngine.setVolume(0.3)
                         }
                         AudioManager.AUDIOFOCUS_GAIN -> {
-                            // Only auto-resume if WE paused due to a transient loss.
-                            // Never auto-resume if the user pressed Stop.
                             if (pausedByFocusLoss) {
                                 pausedByFocusLoss = false
                                 audioEngine.setVolume(1.0)
                                 audioEngine.play()
                                 updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
+                                if (currentTitle.isNotEmpty()) showNotification(currentTitle, true)
                             } else {
-                                // Restore full volume (we may have ducked)
                                 audioEngine.setVolume(1.0)
                             }
                         }
@@ -202,6 +206,7 @@ class PlaybackService : Service() {
             .setActions(
                 PlaybackStateCompat.ACTION_PLAY or
                 PlaybackStateCompat.ACTION_PAUSE or
+                PlaybackStateCompat.ACTION_PLAY_PAUSE or
                 PlaybackStateCompat.ACTION_STOP or
                 PlaybackStateCompat.ACTION_SEEK_TO or
                 PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
@@ -227,26 +232,72 @@ class PlaybackService : Service() {
         }
     }
 
-    fun showNotification(title: String) {
-        val intent = Intent(this, MainActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0, intent,
+    fun showNotification(title: String, isPlaying: Boolean) {
+        val openIntent = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        val prevIntent = MediaButtonReceiver.buildMediaButtonPendingIntent(
+            this, PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+        )
+        val playPauseIntent = MediaButtonReceiver.buildMediaButtonPendingIntent(
+            this, PlaybackStateCompat.ACTION_PLAY_PAUSE
+        )
+        val nextIntent = MediaButtonReceiver.buildMediaButtonPendingIntent(
+            this, PlaybackStateCompat.ACTION_SKIP_TO_NEXT
+        )
+        val stopIntent = MediaButtonReceiver.buildMediaButtonPendingIntent(
+            this, PlaybackStateCompat.ACTION_STOP
+        )
+
+        val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(title.ifEmpty { "MusicPlayerPro" })
             .setContentText("64-bit Hi-Fi Engine")
             .setSmallIcon(android.R.drawable.ic_media_play)
-            .setContentIntent(pendingIntent)
-            .setOngoing(true)
+            .setContentIntent(openIntent)
+            .setDeleteIntent(stopIntent)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setOngoing(isPlaying)
+            // ── action buttons: Previous | Play/Pause | Next ──────────────
+            .addAction(
+                android.R.drawable.ic_media_previous, "Previous", prevIntent
+            )
+            .addAction(
+                if (isPlaying) android.R.drawable.ic_media_pause
+                else           android.R.drawable.ic_media_play,
+                if (isPlaying) "Pause" else "Play",
+                playPauseIntent
+            )
+            .addAction(
+                android.R.drawable.ic_media_next, "Next", nextIntent
+            )
+            // ── MediaStyle: shows lock-screen / notification shade controls ─
+            .setStyle(
+                MediaNotificationCompat.MediaStyle()
+                    .setMediaSession(mediaSession.sessionToken)
+                    .setShowActionsInCompactView(0, 1, 2) // prev, play/pause, next
+                    .setShowCancelButton(true)
+                    .setCancelButtonIntent(stopIntent)
+            )
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+            startForeground(
+                NOTIFICATION_ID, notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            )
         } else {
             startForeground(NOTIFICATION_ID, notification)
+        }
+
+        // When paused, detach from foreground so the notification is dismissable
+        // but keep it visible so the user can resume.
+        if (!isPlaying) {
+            @Suppress("DEPRECATION")
+            stopForeground(false)   // false = don't remove notification
+            getSystemService(NotificationManager::class.java)
+                .notify(NOTIFICATION_ID, notification)
         }
     }
 
