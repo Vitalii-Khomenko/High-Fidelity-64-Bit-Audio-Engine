@@ -1,9 +1,13 @@
-package com.aiproject.musicplayer
+﻿package com.aiproject.musicplayer
 
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
-import android.provider.OpenableColumns
+import android.os.IBinder
 import android.provider.DocumentsContract
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -14,7 +18,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -26,20 +30,52 @@ data class AudioTrack(val uri: Uri, val name: String)
 
 class MainActivity : ComponentActivity() {
 
-    private val audioEngine = AudioEngine()
+    private var playbackService: PlaybackService? = null
+    private var isBound by mutableStateOf(false)
+
+    private val connection = object : ServiceConnection {
+        override fun onServiceConnected(className: ComponentName, service: IBinder) {
+            val binder = service as PlaybackService.LocalBinder
+            playbackService = binder.getService()
+            isBound = true
+        }
+
+        override fun onServiceDisconnected(arg0: ComponentName) {
+            isBound = false
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        Intent(this, PlaybackService::class.java).also { intent ->
+            bindService(intent, connection, Context.BIND_AUTO_CREATE)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        if (isBound) {
+            unbindService(connection)
+            isBound = false
+        }
+    }
 
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
-        audioEngine.initEngine()
 
         setContent {
             MaterialTheme {
                 var playlist by remember { mutableStateOf(listOf<AudioTrack>()) }
                 var currentTrack by remember { mutableStateOf<AudioTrack?>(null) }
+                var volume by remember { mutableFloatStateOf(1.0f) }
+                var progressMs by remember { mutableStateOf(0f) } // Placeholder for actual progress
 
-                // Load persisted files on startup
                 LaunchedEffect(Unit) {
                     val persistedUris = contentResolver.persistedUriPermissions
                     val loadedTracks = mutableListOf<AudioTrack>()
@@ -55,13 +91,17 @@ class MainActivity : ComponentActivity() {
                                     DocumentsContract.Document.COLUMN_DISPLAY_NAME,
                                     DocumentsContract.Document.COLUMN_MIME_TYPE
                                 ), null, null, null)?.use { cursor ->
+                                    val idColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                                    val nameColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                                    val mimeColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+
                                     while (cursor.moveToNext()) {
-                                        val mimeString = cursor.getString(2) ?: ""
-                                        if (mimeString.startsWith("audio/")) {
-                                            val docId = cursor.getString(0)
-                                            val name = cursor.getString(1)
-                                            val docUri = DocumentsContract.buildDocumentUriUsingTree(permission.uri, docId)
-                                            loadedTracks.add(AudioTrack(docUri, name))
+                                        val mimeType = cursor.getString(mimeColumn)
+                                        if (mimeType.startsWith("audio/")) {
+                                            val docId = cursor.getString(idColumn)
+                                            val name = cursor.getString(nameColumn)
+                                            val trackUri = DocumentsContract.buildDocumentUriUsingTree(permission.uri, docId)
+                                            loadedTracks.add(AudioTrack(trackUri, name))
                                         }
                                     }
                                 }
@@ -70,165 +110,146 @@ class MainActivity : ComponentActivity() {
                             e.printStackTrace()
                         }
                     }
-                    if (loadedTracks.isNotEmpty()) {
-                        playlist = loadedTracks
-                    }
+                    playlist = loadedTracks
                 }
 
                 val folderPickerLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.OpenDocumentTree()
-                ) { uri ->
-                    if (uri != null) {
-                        // Persist permissions
+                ) { uri: Uri? ->
+                    uri?.let {
                         contentResolver.takePersistableUriPermission(
-                            uri,
-                            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                            it,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION
                         )
-
-                        val newTracks = mutableListOf<AudioTrack>()
                         val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
-                            uri,
-                            DocumentsContract.getTreeDocumentId(uri)
+                            it,
+                            DocumentsContract.getTreeDocumentId(it)
                         )
+                        val newTracks = mutableListOf<AudioTrack>()
                         contentResolver.query(childrenUri, arrayOf(
                             DocumentsContract.Document.COLUMN_DOCUMENT_ID,
                             DocumentsContract.Document.COLUMN_DISPLAY_NAME,
                             DocumentsContract.Document.COLUMN_MIME_TYPE
                         ), null, null, null)?.use { cursor ->
+                            val idColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                            val nameColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                            val mimeColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+
                             while (cursor.moveToNext()) {
-                                val mimeString = cursor.getString(2) ?: ""
-                                if (mimeString.startsWith("audio/")) {
-                                    val docId = cursor.getString(0)
-                                    val name = cursor.getString(1)
-                                    val docUri = DocumentsContract.buildDocumentUriUsingTree(uri, docId)
-                                    newTracks.add(AudioTrack(docUri, name))
+                                val mimeType = cursor.getString(mimeColumn)
+                                if (mimeType.startsWith("audio/")) {
+                                    val docId = cursor.getString(idColumn)
+                                    val name = cursor.getString(nameColumn)
+                                    val trackUri = DocumentsContract.buildDocumentUriUsingTree(it, docId)
+                                    newTracks.add(AudioTrack(trackUri, name))
                                 }
                             }
                         }
-                        playlist = newTracks
+                        playlist = playlist + newTracks
                     }
                 }
 
                 Scaffold(
                     topBar = {
                         TopAppBar(
-                            title = { Text("MusicPlayerPro (64-bit Core)") },
+                            title = { Text("ZionAudioPro 64-bit") },
                             actions = {
-                                IconButton(onClick = { folderPickerLauncher.launch(null) }) {
-                                    Icon(Icons.Filled.Add, contentDescription = "Add Folder")
+                                Button(onClick = { folderPickerLauncher.launch(null) }) {
+                                    Text("Add Folder +")
                                 }
                             }
                         )
                     }
                 ) { padding ->
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(padding)
-                    ) {
-                        // Playlist view
-                        LazyColumn(modifier = Modifier.weight(1f)) {
-                            items(playlist) { track ->
-                                TrackItem(
-                                    track = track,
-                                    isPlaying = track == currentTrack,
-                                    onClick = {
-                                        currentTrack = track
-                                        // Pass the Context to resolve the URI into a native File Descriptor
-                                        audioEngine.playTrack(track.uri, this@MainActivity)
-                                    }
+                    Column(modifier = Modifier.padding(padding).fillMaxSize()) {
+                        
+                        // Player Controls Base
+                        Card(
+                            modifier = Modifier.fillMaxWidth().padding(16.dp),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Text(
+                                    text = currentTrack?.name ?: "No track playing",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
-                                Divider()
+                                Spacer(modifier = Modifier.height(16.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.Center
+                                ) {
+                                    Button(onClick = {
+                                        if (isBound) {
+                                            playbackService?.getEngine()?.pause()
+                                        }
+                                    }) {
+                                        Text("Stop/Pause")
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(16.dp))
+
+                                // Seek Slider Mock
+                                Text(text = "Seek (ms)", style = MaterialTheme.typography.labelSmall)
+                                Slider(
+                                    value = progressMs,
+                                    onValueChange = { newVal ->
+                                        progressMs = newVal
+                                    },
+                                    onValueChangeFinished = {
+                                        if (isBound) {
+                                            playbackService?.getEngine()?.seekTo(progressMs.toDouble())
+                                        }
+                                    },
+                                    valueRange = 0f..300000f // Hardcoded up to 5 min for UI testing
+                                )
+
+                                Spacer(modifier = Modifier.height(16.dp))
+
+                                Text(text = "Volume (64-bit precise): %", style = MaterialTheme.typography.labelSmall)
+                                Slider(
+                                    value = volume,
+                                    onValueChange = { newVal ->
+                                        volume = newVal
+                                        if (isBound) {
+                                            playbackService?.getEngine()?.setVolume(newVal.toDouble())
+                                        }
+                                    },
+                                    valueRange = 0f..1f
+                                )
                             }
                         }
 
-                        // Player controls
-                        PlayerControls(audioEngine, currentTrack)
+                        // Playlist
+                        Text(
+                            text = "Playlist ( tracks)",
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                            style = MaterialTheme.typography.titleMedium
+                        )
+
+                        LazyColumn(modifier = Modifier.weight(1f)) {
+                            items(playlist) { track ->
+                                ListItem(
+                                    headlineContent = { 
+                                        Text(track.name, maxLines = 1, overflow = TextOverflow.Ellipsis) 
+                                    },
+                                    leadingContent = {
+                                        Icon(Icons.Filled.PlayArrow, contentDescription = "Play")
+                                    },
+                                    modifier = Modifier.clickable {
+                                        currentTrack = track
+                                        if (isBound) {
+                                            playbackService?.playTrack(track.uri, this@MainActivity, track.name)
+                                        }
+                                    }
+                                )
+                                HorizontalDivider()
+                            }
+                        }
                     }
-                }
-            }
-        }
-    }
-
-    private fun getFileName(uri: Uri): String {
-        var result = "Unknown Track"
-        if (uri.scheme == "content") {
-            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    if (index != -1) result = cursor.getString(index)
-                }
-            }
-        }
-        return result
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        audioEngine.shutdownEngine()
-    }
-}
-
-@Composable
-fun TrackItem(track: AudioTrack, isPlaying: Boolean, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(16.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        val color = if (isPlaying) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-        Text(
-            text = track.name,
-            color = color,
-            style = MaterialTheme.typography.bodyLarge,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-    }
-}
-
-@Composable
-fun PlayerControls(engine: AudioEngine, currentTrack: AudioTrack?) {
-    var volume by remember { mutableStateOf(1f) }
-
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        tonalElevation = 4.dp
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(
-                text = currentTrack?.name ?: "No track selected",
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Text(text = "Volume (64-bit precise): ${(volume * 100).toInt()}%", style = MaterialTheme.typography.labelSmall)
-            Slider(
-                value = volume,
-                onValueChange = { newVal -> 
-                    volume = newVal
-                    engine.setVolume(newVal.toDouble())
-                },
-                valueRange = 0f..1f
-            )
-
-            Row {
-                Button(onClick = { engine.play() }, enabled = currentTrack != null) {
-                    Text("Play")
-                }
-                Spacer(modifier = Modifier.width(16.dp))
-                Button(onClick = { engine.pause() }, enabled = currentTrack != null) {
-                    Text("Pause")
                 }
             }
         }

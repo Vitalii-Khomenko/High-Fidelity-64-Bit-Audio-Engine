@@ -1,6 +1,7 @@
 ﻿plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("kotlin-kapt")
     // Ð”Ð¾Ð±Ð°Ð²ÑŒ Ð¿Ð»Ð°Ð³Ð¸Ð½ Compose Compiler, ÐµÑÐ»Ð¸ Ð¸ÑÐ¿Ð¾Ð»ÑŒÐ·ÑƒÐµÑˆÑŒ Kotlin 2.0+
     // id("org.jetbrains.kotlin.plugin.compose")
 }
@@ -63,6 +64,9 @@ android {
 
 dependencies {
     implementation("androidx.media:media:1.6.0")
+    implementation("androidx.room:room-runtime:2.6.1")
+    kapt("androidx.room:room-compiler:2.6.1")
+    implementation("androidx.room:room-ktx:2.6.1")
 
     // Ð˜ÑÐ¿Ð¾Ð»ÑŒÐ·ÑƒÐµÐ¼ Ð¿Ñ€ÑÐ¼Ð¾Ð¹ Ð²Ñ‹Ð·Ð¾Ð² platform Ð±ÐµÐ· ÑÐ¾Ñ…Ñ€Ð°Ð½ÐµÐ½Ð¸Ñ Ð² Ð¿ÐµÑ€ÐµÐ¼ÐµÐ½Ð½ÑƒÑŽ
     implementation(platform("androidx.compose:compose-bom:2024.06.00"))

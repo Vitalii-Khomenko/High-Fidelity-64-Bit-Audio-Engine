@@ -25,6 +25,9 @@ class PlaybackService : Service() {
     private lateinit var audioEngine: AudioEngine
     private var audioFocusRequest: AudioFocusRequest? = null
 
+    // Fix for the getEngine issue
+    fun getEngine(): AudioEngine = audioEngine
+
     inner class LocalBinder : Binder() {
         fun getService(): PlaybackService = this@PlaybackService
     }
@@ -110,9 +113,7 @@ class PlaybackService : Service() {
         } else {
             @Suppress("DEPRECATION")
             val result = audioManager.requestAudioFocus(
-                { focusChange ->
-                    // Legacy focus handling
-                },
+                { _ -> },
                 AudioManager.STREAM_MUSIC,
                 AudioManager.AUDIOFOCUS_GAIN
             )
