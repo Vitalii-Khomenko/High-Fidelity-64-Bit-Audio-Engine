@@ -95,6 +95,7 @@ class MainActivity : ComponentActivity() {
                 var playlist by remember { mutableStateOf(listOf<AudioTrack>()) }
                 var currentIndex by remember { mutableStateOf(-1) }
                 var isPlaying by remember { mutableStateOf(false) }
+                var isLoadingTrack by remember { mutableStateOf(false) }
                 var volume by remember { mutableFloatStateOf(1.0f) }
                 var progressMs by remember { mutableStateOf(0f) }
                 var durationMs by remember { mutableStateOf(1f) }
@@ -102,9 +103,21 @@ class MainActivity : ComponentActivity() {
                 var speedMult by remember { mutableFloatStateOf(1.0f) }
                 var sampleRateKhz by remember { mutableStateOf("") }
                 var bitDepth by remember { mutableStateOf("") }
-                // Tracks that have been played at least once in this session
-                // (used to show a "read" indicator — useful for audiobooks)
-                var playedIndices by remember { mutableStateOf(setOf<Int>()) }
+
+                // Played-track indicator — persisted in SharedPreferences by URI
+                // so it survives app restarts and Activity recreation.
+                // Useful for audiobooks: shows which chapters were already heard.
+                val prefs = remember { getSharedPreferences("audiobook_progress", MODE_PRIVATE) }
+                var playedUris by remember {
+                    mutableStateOf(prefs.getStringSet("played_uris", emptySet<String>())
+                        ?.toSet() ?: emptySet())
+                }
+                // Derive index-set from current playlist + persisted URIs
+                val playedIndices = remember(playlist, playedUris) {
+                    playlist.indices.filter { i ->
+                        playlist[i].uri.toString() in playedUris
+                    }.toSet()
+                }
 
                 // Menu / Dialog state
                 var showMenu by remember { mutableStateOf(false) }
@@ -122,17 +135,35 @@ class MainActivity : ComponentActivity() {
 
                 val currentTrack = if (currentIndex in playlist.indices) playlist[currentIndex] else null
 
-                // Helper to play a track by index
+                // Helper to play a track by index.
+                // The heavy part (file scan + decode init) runs on the IO dispatcher
+                // so the main thread is never frozen.  A loadMutex in PlaybackService
+                // ensures only one native load runs at a time.
                 fun playAtIndex(index: Int) {
                     if (index !in playlist.indices) return
+                    if (isLoadingTrack) return      // debounce: ignore while loading
                     currentIndex = index
-                    isPlaying = true   // optimistic: engine confirms via poll loop
-                    playedIndices = playedIndices + index   // mark as played
+                    isPlaying = true                // optimistic
+                    isLoadingTrack = true
                     val track = playlist[index]
+                    // Persist played state by URI (survives Activity recreation)
+                    val uriStr = track.uri.toString()
+                    if (uriStr !in playedUris) {
+                        playedUris = playedUris + uriStr
+                        prefs.edit().putStringSet("played_uris", playedUris).apply()
+                    }
                     if (isBound) {
-                        playbackService?.playTrack(track.uri, this@MainActivity, track.name)
-                        playbackService?.setPlaybackSpeed(speedMult.toDouble())
-                        playbackService?.setVolume(volume.toDouble())
+                        lifecycleScope.launch {
+                            try {
+                                playbackService?.playTrack(track.uri, this@MainActivity, track.name)
+                                playbackService?.setPlaybackSpeed(speedMult.toDouble())
+                                playbackService?.setVolume(volume.toDouble())
+                            } finally {
+                                isLoadingTrack = false
+                            }
+                        }
+                    } else {
+                        isLoadingTrack = false
                     }
                 }
 
@@ -150,6 +181,21 @@ class MainActivity : ComponentActivity() {
                             val prev = currentIndex - 1
                             if (prev >= 0) {
                                 lifecycleScope.launch(Dispatchers.Main) { playAtIndex(prev) }
+                            }
+                        }
+                    }
+                }
+
+                // Restore currentIndex after Activity recreation (e.g. opened from notification).
+                // Fires whenever isBound changes OR the playlist is (re)loaded.
+                LaunchedEffect(isBound, playlist.size) {
+                    if (isBound && currentIndex == -1 && playlist.isNotEmpty()) {
+                        val title = playbackService?.currentTitle
+                        if (!title.isNullOrEmpty()) {
+                            val idx = playlist.indexOfFirst { it.name == title }
+                            if (idx >= 0) {
+                                currentIndex = idx
+                                isPlaying = playbackService?.getEngine()?.isPlaying() == true
                             }
                         }
                     }
@@ -176,8 +222,9 @@ class MainActivity : ComponentActivity() {
                                 if (bd > 0) bitDepth = "$bd-bit"
 
                                 // Auto-advance to next track when current finishes
-                                if (!isPlaying && currentIndex >= 0 && progressMs > 0f
-                                    && durationMs > 0f
+                                // Guard: skip if a load is already in progress
+                                if (!isPlaying && !isLoadingTrack && currentIndex >= 0
+                                    && progressMs > 0f && durationMs > 0f
                                     && (durationMs - progressMs) < 1000f
                                 ) {
                                     val nextIdx = currentIndex + 1
@@ -369,7 +416,6 @@ class MainActivity : ComponentActivity() {
                                                             lifecycleScope.launch(Dispatchers.Main) {
                                                                 playlist = loaded
                                                                 currentIndex = -1
-                                                                playedIndices = emptySet()
                                                                 showLoadPlaylist = false
                                                                 Toast.makeText(
                                                                     this@MainActivity,
@@ -708,7 +754,9 @@ class MainActivity : ComponentActivity() {
                                     currentIndex = -1
                                     isPlaying = false
                                     progressMs = 0f
-                                    playedIndices = emptySet()
+                                    // Clear played progress for audiobooks (explicit user action)
+                                    playedUris = emptySet()
+                                    prefs.edit().remove("played_uris").apply()
                                 }) {
                                     Text("Clear", style = MaterialTheme.typography.labelSmall)
                                 }
