@@ -44,7 +44,7 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 
-data class AudioTrack(val uri: Uri, val name: String)
+data class AudioTrack(val uri: Uri, val name: String, val folder: String = "")
 
 class MainActivity : ComponentActivity() {
 
@@ -100,7 +100,7 @@ class MainActivity : ComponentActivity() {
                 fun savePlaylistToPrefs(tracks: List<AudioTrack>) {
                     val arr = JSONArray()
                     tracks.forEach { t ->
-                        arr.put(JSONObject().put("uri", t.uri.toString()).put("name", t.name))
+                        arr.put(JSONObject().put("uri", t.uri.toString()).put("name", t.name).put("folder", t.folder))
                     }
                     statePrefs.edit().putString("playlist_json", arr.toString()).apply()
                 }
@@ -110,7 +110,7 @@ class MainActivity : ComponentActivity() {
                         val arr = JSONArray(json)
                         (0 until arr.length()).map { i ->
                             val o = arr.getJSONObject(i)
-                            AudioTrack(Uri.parse(o.getString("uri")), o.getString("name"))
+                            AudioTrack(Uri.parse(o.getString("uri")), o.getString("name"), o.optString("folder", ""))
                         }
                     } catch (_: Exception) { emptyList() }
                 }
@@ -725,7 +725,7 @@ class MainActivity : ComponentActivity() {
                                         onClick = {
                                             if (isBound) {
                                                 if (isPlaying) {
-                                                    playbackService?.getEngine()?.pause()
+                                                    playbackService?.pausePlayback()
                                                     // Save position on pause for audiobook resume
                                                     statePrefs.edit()
                                                         .putFloat("saved_position_ms", progressMs)
@@ -772,39 +772,53 @@ class MainActivity : ComponentActivity() {
 
                                 Spacer(Modifier.height(8.dp))
 
-                                // Speed slider
-                                Text(
-                                    text = "Speed: ${"%.2f".format(speedMult)}x",
-                                    style = MaterialTheme.typography.labelSmall
-                                )
-                                Slider(
-                                    value = speedMult,
-                                    onValueChange = { newVal ->
-                                        speedMult = newVal
-                                        if (isBound) playbackService?.setPlaybackSpeed(newVal.toDouble())
-                                    },
-                                    valueRange = 0.5f..2.5f,
-                                    steps = 7  // 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5
-                                )
+                                var showAdvanced by remember { mutableStateOf(false) }
 
-                                Spacer(Modifier.height(4.dp))
+                                TextButton(
+                                    onClick = { showAdvanced = !showAdvanced },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        if (showAdvanced) "▲ Hide controls" else "▼ Speed / Volume",
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
 
-                                // Volume slider
-                                Text(
-                                    text = "Volume: ${(volume * 100).toInt()}%",
-                                    style = MaterialTheme.typography.labelSmall
-                                )
-                                Slider(
-                                    value = volume,
-                                    onValueChange = { newVal ->
-                                        volume = newVal
-                                        if (sleepTimerEndMs == 0L) {
-                                            // Only update volume directly if sleep timer is not fading
-                                            if (isBound) playbackService?.setVolume(newVal.toDouble())
-                                        }
-                                    },
-                                    valueRange = 0f..1f
-                                )
+                                if (showAdvanced) {
+                                    // Speed slider
+                                    Text(
+                                        text = "Speed: ${"%.2f".format(speedMult)}x",
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                    Slider(
+                                        value = speedMult,
+                                        onValueChange = { newVal ->
+                                            speedMult = newVal
+                                            if (isBound) playbackService?.setPlaybackSpeed(newVal.toDouble())
+                                        },
+                                        valueRange = 0.5f..2.5f,
+                                        steps = 7  // 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5
+                                    )
+
+                                    Spacer(Modifier.height(4.dp))
+
+                                    // Volume slider
+                                    Text(
+                                        text = "Volume: ${(volume * 100).toInt()}%",
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                    Slider(
+                                        value = volume,
+                                        onValueChange = { newVal ->
+                                            volume = newVal
+                                            if (sleepTimerEndMs == 0L) {
+                                                // Only update volume directly if sleep timer is not fading
+                                                if (isBound) playbackService?.setVolume(newVal.toDouble())
+                                            }
+                                        },
+                                        valueRange = 0f..1f
+                                    )
+                                }
                             }
                         }
 
@@ -896,6 +910,9 @@ class MainActivity : ComponentActivity() {
                                                 color = textColor
                                             )
                                         },
+                                        supportingContent = if (track.folder.isNotEmpty()) {
+                                            { Text(track.folder, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f), maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                                        } else null,
                                         leadingContent = {
                                             when {
                                                 isCurrentTrack && isPlaying -> Icon(
@@ -941,8 +958,18 @@ class MainActivity : ComponentActivity() {
         return "%d:%02d".format(min, sec)
     }
 
+    private fun folderNameFromTreeUri(treeUri: Uri): String {
+        return try {
+            val docId = DocumentsContract.getTreeDocumentId(treeUri) // e.g. "primary:Music/Audiobooks"
+            val decoded = Uri.decode(docId) // decode %3A etc
+            // Take the last path component after the last /
+            decoded.substringAfterLast('/').substringAfterLast(':').ifEmpty { decoded }
+        } catch (_: Exception) { "" }
+    }
+
     private fun loadTracksFromTree(treeUri: Uri): List<AudioTrack> {
         val result = mutableListOf<AudioTrack>()
+        val folderName = folderNameFromTreeUri(treeUri)
         try {
             val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
                 treeUri, DocumentsContract.getTreeDocumentId(treeUri)
@@ -964,7 +991,7 @@ class MainActivity : ComponentActivity() {
                         val docId = cursor.getString(idCol)
                         val name  = cursor.getString(nameCol) ?: docId
                         val uri   = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
-                        result.add(AudioTrack(uri, name))
+                        result.add(AudioTrack(uri, name, folderName))
                     }
                 }
             }
@@ -977,10 +1004,15 @@ class MainActivity : ComponentActivity() {
     private fun scanMediaStore(): List<AudioTrack> {
         val result = mutableListOf<AudioTrack>()
         try {
+            val folderCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                MediaStore.Audio.Media.RELATIVE_PATH
+            else
+                MediaStore.Audio.Media.DATA
             val projection = arrayOf(
                 MediaStore.Audio.Media._ID,
                 MediaStore.Audio.Media.DISPLAY_NAME,
-                MediaStore.Audio.Media.MIME_TYPE
+                MediaStore.Audio.Media.MIME_TYPE,
+                folderCol
             )
             val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0"
             val sortOrder = "${MediaStore.Audio.Media.DISPLAY_NAME} ASC"
@@ -989,15 +1021,21 @@ class MainActivity : ComponentActivity() {
                 MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
                 projection, selection, null, sortOrder
             )?.use { cursor ->
-                val idCol   = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
-                val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
+                val idCol      = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+                val nameCol    = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
+                val folderColIdx = cursor.getColumnIndexOrThrow(folderCol)
                 while (cursor.moveToNext()) {
                     val id   = cursor.getLong(idCol)
                     val name = cursor.getString(nameCol) ?: "Track $id"
                     val uri  = ContentUris.withAppendedId(
                         MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id
                     )
-                    result.add(AudioTrack(uri, name))
+                    val folderStr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        cursor.getString(folderColIdx)?.trimEnd('/')?.substringAfterLast('/') ?: ""
+                    } else {
+                        cursor.getString(folderColIdx)?.substringBeforeLast('/')?.substringAfterLast('/') ?: ""
+                    }
+                    result.add(AudioTrack(uri, name, folderStr))
                 }
             }
         } catch (e: Exception) {

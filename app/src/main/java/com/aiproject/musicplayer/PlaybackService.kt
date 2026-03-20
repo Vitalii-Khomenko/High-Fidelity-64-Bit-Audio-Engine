@@ -157,6 +157,8 @@ class PlaybackService : Service() {
     fun playTrack(uri: Uri, context: Context, title: String) {
         isManualStop = false
         completionJob?.cancel()
+        // Brief silence to prevent click/pop at track boundary
+        audioEngine.setVolume(0.0)
         currentTitle = title
         pausedByFocusLoss = false
         requestAudioFocus()
@@ -169,6 +171,8 @@ class PlaybackService : Service() {
                     audioEngine.playTrack(uri, context)
                 }
             }
+            // Restore volume after new track loads
+            audioEngine.setVolume(currentVolume)
             val durationMs = try { audioEngine.getDurationMs().toLong() } catch (_: Exception) { 0L }
             mediaSession.setMetadata(
                 MediaMetadataCompat.Builder()
@@ -197,8 +201,21 @@ class PlaybackService : Service() {
         }
     }
 
+    private var currentVolume = 1.0
+
+    fun pausePlayback() {
+        isManualStop = true
+        completionJob?.cancel()
+        pausedByFocusLoss = false
+        audioEngine.pause()
+        updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
+        abandonAudioFocus()
+        if (currentTitle.isNotEmpty()) showNotification(currentTitle, false)
+        // Save position on pause
+    }
+
     fun setPlaybackSpeed(speed: Double) { audioEngine.setSpeed(speed) }
-    fun setVolume(volume: Double)        { audioEngine.setVolume(volume) }
+    fun setVolume(volume: Double)        { currentVolume = volume; audioEngine.setVolume(volume) }
 
     // ── Audio focus ──────────────────────────────────────────────────────────
 
