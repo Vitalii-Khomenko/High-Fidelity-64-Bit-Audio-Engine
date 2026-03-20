@@ -183,6 +183,8 @@ class PlaybackService : Service() {
         currentTitle = title
         pausedByFocusLoss = false
         requestAudioFocus()
+        // Signal intent immediately — don't wait for fade to finish
+        updatePlaybackState(PlaybackStateCompat.STATE_BUFFERING)
         showNotification(title, true)
 
         loadJob?.cancel()
@@ -278,12 +280,31 @@ class PlaybackService : Service() {
         completionJob?.cancel()
         gaplessJob?.cancel()
         fadeJob?.cancel()
+        // Update MediaSession and notification IMMEDIATELY — user intent is clear,
+        // no need to wait 200 ms for the fade to finish.
+        updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
+        if (currentTitle.isNotEmpty()) showNotification(currentTitle, false)
         fadeJob = serviceScope.launch {
             fadeOut()
             pausedByFocusLoss = false
-            updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
             abandonAudioFocus()
-            if (currentTitle.isNotEmpty()) showNotification(currentTitle, false)
+        }
+    }
+
+    fun resumePlayback() {
+        if (currentTitle.isEmpty()) return
+        isManualStop = false
+        requestAudioFocus()
+        // Signal intent immediately
+        updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
+        showNotification(currentTitle, true)
+        fadeJob?.cancel()
+        fadeJob = serviceScope.launch {
+            audioEngine.play()
+            for (step in 1..15) {
+                audioEngine.setVolume(currentVolume * step / 15.0)
+                delay(20)
+            }
         }
     }
 
@@ -308,7 +329,9 @@ class PlaybackService : Service() {
                 .setOnAudioFocusChangeListener { change ->
                     when (change) {
                         AudioManager.AUDIOFOCUS_LOSS -> {
-                            // Loss (e.g. voice message app, call, another player).
+                            // Permanent loss (voice-message app, call, another player).
+                            // Update UI immediately, then fade audio — keeps notification
+                            // visible and the service alive as a foreground service.
                             // Keep focus request alive so we get AUDIOFOCUS_GAIN when
                             // the other app finishes — then auto-resume.
                             pausedByFocusLoss = true
@@ -316,24 +339,31 @@ class PlaybackService : Service() {
                             completionJob?.cancel()
                             gaplessJob?.cancel()
                             fadeJob?.cancel()
+                            updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
+                            if (currentTitle.isNotEmpty()) showNotification(currentTitle, false)
                             fadeJob = serviceScope.launch {
                                 fadeOut()
-                                updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
-                                if (currentTitle.isNotEmpty()) showNotification(currentTitle, false)
                                 // Do NOT abandonAudioFocus — we want AUDIOFOCUS_GAIN when they finish
                             }
                         }
                         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                            // Transient loss (e.g. microphone, navigation, call):
-                            // pause but keep focus so AUDIOFOCUS_GAIN resumes us.
+                            // Transient loss (microphone, navigation, call):
+                            // pause quickly so the recording app gets silence immediately,
+                            // keep focus request alive so AUDIOFOCUS_GAIN auto-resumes us.
                             if (audioEngine.isPlaying()) {
                                 pausedByFocusLoss = true
-                                isManualStop = true          // prevent completionJob from firing next track
+                                isManualStop = true
                                 completionJob?.cancel()
                                 gaplessJob?.cancel()
                                 fadeJob?.cancel()
+                                // 3-step fade (≈60 ms) — stop audio fast so mic gets clean input
                                 fadeJob = serviceScope.launch {
-                                    fadeOut()
+                                    for (step in 2 downTo 0) {
+                                        audioEngine.setVolume(currentVolume * step / 3.0)
+                                        delay(20)
+                                    }
+                                    audioEngine.pause()
+                                    audioEngine.setVolume(currentVolume) // restore for next play
                                     updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
                                     if (currentTitle.isNotEmpty()) showNotification(currentTitle, false)
                                     // Do NOT call abandonAudioFocus() — we rely on AUDIOFOCUS_GAIN
@@ -514,18 +544,14 @@ class PlaybackService : Service() {
             )
             .build()
 
+        // Always keep the service as a foreground service while a track is loaded.
+        // Never call stopForeground() here — Xiaomi/MIUI kills background services
+        // the moment they lose audio focus.  Only stopPlayback() removes foreground.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification,
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
         } else {
             startForeground(NOTIFICATION_ID, notification)
-        }
-
-        if (!isPlaying) {
-            @Suppress("DEPRECATION")
-            stopForeground(false)
-            getSystemService(NotificationManager::class.java)
-                .notify(NOTIFICATION_ID, notification)
         }
     }
 }

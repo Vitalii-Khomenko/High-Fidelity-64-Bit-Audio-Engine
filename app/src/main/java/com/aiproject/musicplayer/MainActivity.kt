@@ -1261,13 +1261,15 @@ class MainActivity : ComponentActivity() {
                                         onClick = {
                                             if (isBound) {
                                                 if (isPlaying) {
+                                                    isPlaying = false  // flip immediately — don't wait for poll
                                                     playbackService?.pausePlayback()
                                                     statePrefs.edit()
                                                         .putFloat("saved_position_ms", progressMs)
                                                         .putInt("current_index", currentIndex)
                                                         .apply()
                                                 } else if (currentTrack != null) {
-                                                    playbackService?.getEngine()?.play()
+                                                    isPlaying = true   // flip immediately
+                                                    playbackService?.resumePlayback()
                                                 } else if (playlist.isNotEmpty()) {
                                                     playAtIndex(0)
                                                 }
