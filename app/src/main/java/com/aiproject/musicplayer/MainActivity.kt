@@ -46,10 +46,26 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
 import com.aiproject.musicplayer.db.*
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothA2dp
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
+import android.content.pm.PackageManager
+import androidx.annotation.RequiresApi
+import androidx.compose.runtime.rememberCoroutineScope
+import java.io.File
+import java.io.OutputStreamWriter
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.HttpURLConnection
+import java.net.InetAddress
+import java.net.URL
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -115,6 +131,66 @@ fun detectHeadsetInfo(audioManager: AudioManager): HeadsetInfo? {
     return HeadsetInfo(name, typeName, maxSR, maxBits, maxCh)
 }
 
+/** Fetch the active Bluetooth A2DP codec (LDAC / aptX HD / aptX / AAC / SBC).
+ *  Requires API 29+ (BluetoothCodecConfig became public API in Q).
+ *  Calls [onResult] on the main thread via the profile service listener.
+ */
+fun fetchBluetoothCodec(context: Context, onResult: (String) -> Unit) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+    fetchBluetoothCodecQ(context, onResult)
+}
+
+@RequiresApi(Build.VERSION_CODES.Q)
+@SuppressLint("MissingPermission")
+private fun fetchBluetoothCodecQ(context: Context, onResult: (String) -> Unit) {
+    val adapter: BluetoothAdapter? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        context.getSystemService(BluetoothManager::class.java)?.adapter
+    } else {
+        @Suppress("DEPRECATION")
+        BluetoothAdapter.getDefaultAdapter()
+    }
+    if (adapter == null || !adapter.isEnabled) return
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+        context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+        != PackageManager.PERMISSION_GRANTED) return
+
+    adapter.getProfileProxy(context, object : BluetoothProfile.ServiceListener {
+        override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
+            try {
+                val a2dp = proxy as BluetoothA2dp
+                val device = a2dp.connectedDevices.firstOrNull()
+                if (device != null) {
+                    val type: Int = try {
+                        // getCodecStatus is not in public SDK stubs — use reflection
+                        val method = BluetoothA2dp::class.java.getMethod("getCodecStatus", device.javaClass)
+                        val status = method.invoke(a2dp, device)
+                        if (status != null) {
+                            val getConfig = status.javaClass.getMethod("getCodecConfig")
+                            val config = getConfig.invoke(status)
+                            if (config != null) {
+                                val getType = config.javaClass.getMethod("getCodecType")
+                                (getType.invoke(config) as? Int) ?: -1
+                            } else -1
+                        } else -1
+                    } catch (_: Exception) { -1 }
+                    onResult(when (type) {
+                        0 -> "SBC"
+                        1 -> "AAC"
+                        2 -> "aptX"
+                        3 -> "aptX HD"
+                        4 -> "LDAC"
+                        5 -> "aptX Adaptive"
+                        6 -> "LC3"
+                        else -> ""
+                    })
+                }
+            } catch (_: Exception) {}
+            adapter.closeProfileProxy(BluetoothProfile.A2DP, proxy)
+        }
+        override fun onServiceDisconnected(profile: Int) {}
+    }, BluetoothProfile.A2DP)
+}
+
 class MainActivity : ComponentActivity() {
 
     private var playbackService: PlaybackService? = null
@@ -164,6 +240,7 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 // --- Persistent state prefs ---
                 val statePrefs = remember { getSharedPreferences("player_state", MODE_PRIVATE) }
+                val coroutineScope = rememberCoroutineScope()
 
                 // Helper to save/load playlist as JSON
                 fun savePlaylistToPrefs(tracks: List<AudioTrack>) {
@@ -199,6 +276,15 @@ class MainActivity : ComponentActivity() {
                 var bitDepth by remember { mutableStateOf("") }
                 var spectrumBands by remember { mutableStateOf(FloatArray(32)) }
                 var replayGainDb  by remember { mutableFloatStateOf(0f) }
+                var bluetoothCodec by remember { mutableStateOf("") }
+
+                // DLNA / UPnP browser state
+                var dlnaShow     by remember { mutableStateOf(false) }
+                var dlnaScanning by remember { mutableStateOf(false) }
+                var dlnaServers  by remember { mutableStateOf<List<DlnaServer>>(emptyList()) }
+                var dlnaSelected by remember { mutableStateOf<DlnaServer?>(null) }
+                var dlnaTracks   by remember { mutableStateOf<List<DlnaTrack>>(emptyList()) }
+                var dlnaBrowsing by remember { mutableStateOf(false) }
 
                 // Repeat mode: 0=off  1=repeat one  2=repeat all
                 var repeatMode by remember { mutableIntStateOf(0) }
@@ -228,6 +314,17 @@ class MainActivity : ComponentActivity() {
                     }
                     audioManager.registerAudioDeviceCallback(callback, null)
                     onDispose { audioManager.unregisterAudioDeviceCallback(callback) }
+                }
+
+                // Fetch Bluetooth codec whenever the connected audio device changes
+                LaunchedEffect(headsetInfo) {
+                    bluetoothCodec = ""
+                    val info = headsetInfo ?: return@LaunchedEffect
+                    if (info.connectionType.startsWith("Bluetooth")) {
+                        fetchBluetoothCodec(this@MainActivity) { codec ->
+                            bluetoothCodec = codec
+                        }
+                    }
                 }
 
                 // Played-track indicator — persisted in SharedPreferences by URI
@@ -289,8 +386,20 @@ class MainActivity : ComponentActivity() {
                     if (isBound) {
                         lifecycleScope.launch {
                             try {
+                                // DLNA tracks have http:// URIs — download to cache before playing
+                                val playUri = if (track.uri.scheme?.startsWith("http") == true) {
+                                    withContext(Dispatchers.IO) {
+                                        val cacheFile = File(cacheDir, "dlna_${track.uri.hashCode()}.audio")
+                                        if (!cacheFile.exists()) {
+                                            URL(track.uri.toString()).openStream().use { input ->
+                                                cacheFile.outputStream().use { output -> input.copyTo(output) }
+                                            }
+                                        }
+                                        Uri.fromFile(cacheFile)
+                                    }
+                                } else track.uri
                                 playbackService?.playTrack(
-                                    track.uri, this@MainActivity, track.name, resumePos.toDouble()
+                                    playUri, this@MainActivity, track.name, resumePos.toDouble()
                                 )
                                 playbackService?.setPlaybackSpeed(speedMult.toDouble())
                                 playbackService?.setVolume(volume.toDouble())
@@ -479,7 +588,15 @@ class MainActivity : ComponentActivity() {
                         permissionLauncher.launch(
                             arrayOf(
                                 Manifest.permission.POST_NOTIFICATIONS,
-                                Manifest.permission.READ_MEDIA_AUDIO
+                                Manifest.permission.READ_MEDIA_AUDIO,
+                                Manifest.permission.BLUETOOTH_CONNECT
+                            )
+                        )
+                    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        permissionLauncher.launch(
+                            arrayOf(
+                                Manifest.permission.READ_EXTERNAL_STORAGE,
+                                Manifest.permission.BLUETOOTH_CONNECT
                             )
                         )
                     } else {
@@ -729,6 +846,158 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
+                // DLNA / UPnP browser dialog
+                if (dlnaShow) {
+                    AlertDialog(
+                        onDismissRequest = { dlnaShow = false },
+                        title = { Text("Network Sources (DLNA)") },
+                        text = {
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                when {
+                                    dlnaScanning -> {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                                            Spacer(Modifier.width(12.dp))
+                                            Text("Scanning network\u2026", style = MaterialTheme.typography.bodyMedium)
+                                        }
+                                    }
+                                    dlnaBrowsing -> {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                                            Spacer(Modifier.width(12.dp))
+                                            Text("Loading tracks\u2026", style = MaterialTheme.typography.bodyMedium)
+                                        }
+                                    }
+                                    dlnaSelected != null && dlnaTracks.isNotEmpty() -> {
+                                        Text(
+                                            "Server: ${dlnaSelected!!.friendlyName}",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        Spacer(Modifier.height(4.dp))
+                                        Text(
+                                            "${dlnaTracks.size} audio tracks found",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                        )
+                                        Spacer(Modifier.height(8.dp))
+                                        LazyColumn(modifier = Modifier.heightIn(max = 300.dp)) {
+                                            itemsIndexed(dlnaTracks) { _, track ->
+                                                ListItem(
+                                                    headlineContent = {
+                                                        Text(track.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                                            style = MaterialTheme.typography.bodySmall)
+                                                    },
+                                                    supportingContent = if (track.durationMs > 0) {
+                                                        {
+                                                            val s = track.durationMs / 1000
+                                                            Text("%d:%02d".format(s / 60, s % 60),
+                                                                style = MaterialTheme.typography.labelSmall)
+                                                        }
+                                                    } else null,
+                                                    modifier = Modifier.clickable {
+                                                        val newTrack = AudioTrack(
+                                                            Uri.parse(track.url),
+                                                            track.title,
+                                                            dlnaSelected!!.friendlyName
+                                                        )
+                                                        val updated = playlist + newTrack
+                                                        playlist = updated
+                                                        savePlaylistToPrefs(updated)
+                                                        Toast.makeText(this@MainActivity, "Added: ${track.title}", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                )
+                                                HorizontalDivider(thickness = 0.5.dp)
+                                            }
+                                        }
+                                        Spacer(Modifier.height(8.dp))
+                                        OutlinedButton(
+                                            onClick = {
+                                                val newTracks = dlnaTracks.map { t ->
+                                                    AudioTrack(Uri.parse(t.url), t.title, dlnaSelected!!.friendlyName)
+                                                }
+                                                val updated = playlist + newTracks
+                                                playlist = updated
+                                                savePlaylistToPrefs(updated)
+                                                Toast.makeText(this@MainActivity,
+                                                    "Added ${newTracks.size} tracks", Toast.LENGTH_SHORT).show()
+                                                dlnaShow = false
+                                            },
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) { Text("Add all ${dlnaTracks.size} tracks to playlist") }
+                                    }
+                                    dlnaSelected != null && dlnaTracks.isEmpty() && !dlnaBrowsing -> {
+                                        Text("No audio tracks found on ${dlnaSelected!!.friendlyName}.",
+                                            style = MaterialTheme.typography.bodyMedium)
+                                        Spacer(Modifier.height(8.dp))
+                                        TextButton(onClick = { dlnaSelected = null }) { Text("\u2190 Back") }
+                                    }
+                                    dlnaServers.isEmpty() && !dlnaScanning -> {
+                                        Text(
+                                            "No DLNA media servers found.\n\nMake sure your media server (e.g. Plex, Emby, Jellyfin, Windows Media Player, Kodi) is running on the same Wi-Fi network.",
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                    else -> {
+                                        // Server list
+                                        Text("Found ${dlnaServers.size} server(s):",
+                                            style = MaterialTheme.typography.labelMedium)
+                                        Spacer(Modifier.height(4.dp))
+                                        LazyColumn(modifier = Modifier.heightIn(max = 300.dp)) {
+                                            itemsIndexed(dlnaServers) { _, server ->
+                                                ListItem(
+                                                    headlineContent = {
+                                                        Text(server.friendlyName, maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis)
+                                                    },
+                                                    leadingContent = {
+                                                        Icon(Icons.Filled.Wifi, contentDescription = null,
+                                                            modifier = Modifier.size(20.dp),
+                                                            tint = MaterialTheme.colorScheme.primary)
+                                                    },
+                                                    modifier = Modifier.clickable {
+                                                        dlnaSelected = server
+                                                        dlnaBrowsing = true
+                                                        dlnaTracks = emptyList()
+                                                        coroutineScope.launch {
+                                                            dlnaTracks = DlnaDiscovery.browse(server)
+                                                            dlnaBrowsing = false
+                                                        }
+                                                    }
+                                                )
+                                                HorizontalDivider(thickness = 0.5.dp)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        confirmButton = {
+                            if (dlnaSelected != null && !dlnaBrowsing) {
+                                TextButton(onClick = { dlnaSelected = null; dlnaTracks = emptyList() }) {
+                                    Text("\u2190 Back")
+                                }
+                            }
+                        },
+                        dismissButton = {
+                            Row {
+                                TextButton(onClick = {
+                                    dlnaScanning = true
+                                    dlnaServers = emptyList()
+                                    dlnaSelected = null
+                                    dlnaTracks = emptyList()
+                                    coroutineScope.launch {
+                                        dlnaServers = DlnaDiscovery.discoverServers()
+                                        dlnaScanning = false
+                                    }
+                                }) { Text(if (dlnaScanning) "Scanning\u2026" else "Scan") }
+                                Spacer(Modifier.width(8.dp))
+                                TextButton(onClick = { dlnaShow = false }) { Text("Close") }
+                            }
+                        }
+                    )
+                }
+
                 // --- Main UI ---
                 Scaffold(
                     topBar = {
@@ -790,6 +1059,22 @@ class MainActivity : ComponentActivity() {
                                         text = { Text("Sleep Timer") },
                                         leadingIcon = { Icon(Icons.Filled.Timer, null) },
                                         onClick = { showMenu = false; showSleepTimer = true }
+                                    )
+                                    HorizontalDivider()
+                                    DropdownMenuItem(
+                                        text = { Text("Browse Network (DLNA)") },
+                                        leadingIcon = { Icon(Icons.Filled.Wifi, null) },
+                                        onClick = {
+                                            showMenu = false
+                                            dlnaShow = true
+                                            if (dlnaServers.isEmpty() && !dlnaScanning) {
+                                                dlnaScanning = true
+                                                coroutineScope.launch {
+                                                    dlnaServers = DlnaDiscovery.discoverServers()
+                                                    dlnaScanning = false
+                                                }
+                                            }
+                                        }
                                     )
                                 }
                             }
@@ -854,7 +1139,15 @@ class MainActivity : ComponentActivity() {
                                             modifier = Modifier.size(12.dp), tint = tint)
                                         Spacer(Modifier.width(4.dp))
                                         Text(
-                                            text = "${info.name}  ·  ${info.summary}",
+                                            text = buildString {
+                                                append(info.name)
+                                                append("  ·  ")
+                                                append(info.summary)
+                                                if (bluetoothCodec.isNotEmpty()) {
+                                                    append("  ·  ")
+                                                    append(bluetoothCodec)
+                                                }
+                                            },
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                                             maxLines = 1,

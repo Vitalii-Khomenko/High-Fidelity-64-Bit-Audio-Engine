@@ -83,11 +83,19 @@ Android's standard `AudioTrack` has 20–50 ms latency and introduces its own re
 - **Stops on swipe-away** — when user removes app from recents, playback stops and notification is cleared
 - **Async loading** — `Dispatchers.IO` coroutine + `Mutex` serializes JNI loads; UI is always responsive
 
-### Output Device Detection
+### Output Device Detection & Bluetooth Codec
 - Detects connected headset / DAC in real time
 - Shows device name, connection type (USB / Bluetooth A2DP / Bluetooth LE / Wired), maximum supported sample rate and bit depth
+- **Bluetooth codec**: reads active A2DP codec via `BluetoothA2dp` profile proxy — displays LDAC / aptX HD / aptX / AAC / SBC next to device name
 - Updates automatically on connect/disconnect
 - Priority: USB DAC > USB headset > Bluetooth A2DP > Bluetooth LE > wired
+
+### Network Sources (DLNA/UPnP)
+- **SSDP discovery** — scans local network for UPnP MediaServer:1 devices (Plex, Emby, Jellyfin, Kodi, Windows Media Player, etc.)
+- **ContentDirectory browse** — SOAP request returns up to 500 audio tracks per container
+- **Add to playlist** — add individual tracks or entire server library to the current playlist
+- **HTTP cache** — DLNA tracks are downloaded to local cache on first play; subsequent plays are instant
+- Access via **⋮ → Browse Network (DLNA)** — scan starts automatically on open
 
 ### Playlist Management
 - **Add Folder** — grant persistent URI permission to any folder; loads on every restart automatically
@@ -306,11 +314,11 @@ MusicPlayerPro/
 ## Roadmap
 
 - [ ] Full DSD playback via USB isochronous transfer (libusb)
-- [ ] Bluetooth codec selection (LDAC / aptX HD) via `BluetoothA2dp` profile API
+- [x] **Bluetooth codec detection** — connects to `BluetoothA2dp` profile proxy at runtime; reads active codec (LDAC / aptX HD / aptX / AAC / SBC) and displays it in the headset info bar alongside device name and sample-rate/bit-depth
 - [x] **Gapless playback** — `m_nextDecoder` slot in `AudioPlayer`; pre-loaded ~8 s before EOF; seamless C++ decoder swap with zero stream interruption
 - [x] **ReplayGain** — scans first 64 KB of FLAC/MP3 for `REPLAYGAIN_TRACK_GAIN` tag; applied automatically as a `GainProcessor` multiplier; displayed as `±X.X dB` in the player UI
 - [x] **Spectrum analyzer** — 2048-point Hann-windowed FFT (Cooley-Tukey radix-2); 32 logarithmic bands with attack/decay smoothing; rendered as a live gradient bar chart in the player card
-- [ ] DLNA / UPnP network source support
+- [x] **DLNA / UPnP network source** — SSDP M-SEARCH discovers MediaServer:1 devices on the local network; ContentDirectory:Browse SOAP fetches audio track listings; tracks are added to the playlist and streamed via HTTP with local cache; works with Plex, Emby, Jellyfin, Kodi, and any UPnP media server
 
 ---
 
