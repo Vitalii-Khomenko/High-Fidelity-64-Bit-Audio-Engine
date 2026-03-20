@@ -1143,12 +1143,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                     if (dsdNativeRate > 0) {
                                         Spacer(Modifier.width(6.dp))
-                                        val dsdLabel = when {
-                                            dsdNativeRate >= 11_289_600 -> "DSD512"
-                                            dsdNativeRate >= 5_644_800  -> "DSD256"
-                                            dsdNativeRate >= 2_822_400  -> "DSD128"
-                                            else                         -> "DSD64"
-                                        }
+                                        val dsdLabel = DsdInfo.label(dsdNativeRate) ?: "DSD"
                                         Surface(
                                             shape = RoundedCornerShape(4.dp),
                                             color = Color(0xFFFFD700).copy(alpha = 0.18f),

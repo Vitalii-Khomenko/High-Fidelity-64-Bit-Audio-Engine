@@ -212,4 +212,63 @@ class PlaybackStateMachineTest {
         assertTrue(sm.shouldFireCompletion())
         assertEquals("Music must resume", 1, playCount)
     }
+
+    // ── Additional edge cases ─────────────────────────────────────────────────
+
+    @Test fun `multiple consecutive focus losses do not double-pause`() {
+        val sm = machine()
+        sm.onPlayTrackStarted()
+        sm.onAudioFocusChange(PlaybackStateMachine.FOCUS_LOSS_TRANSIENT) // pause #1
+        enginePlaying = false
+        sm.onAudioFocusChange(PlaybackStateMachine.FOCUS_LOSS_TRANSIENT) // already paused
+        assertEquals("Must not double-pause", 1, pauseCount)
+    }
+
+    @Test fun `focus gain while engine still playing (duck recovery) does not pause`() {
+        val sm = machine()
+        sm.onPlayTrackStarted()
+        sm.onAudioFocusChange(PlaybackStateMachine.FOCUS_CAN_DUCK)
+        // engine is still playing during duck
+        sm.onAudioFocusChange(PlaybackStateMachine.FOCUS_GAIN)
+        assertEquals("Must not pause during duck recovery", 0, pauseCount)
+        assertEquals("Must not call play during duck recovery", 0, playCount)
+        assertEquals("Must restore volume", 1.0, duckLevel, 0.001)
+    }
+
+    @Test fun `user stop prevents completion from firing`() {
+        val sm = machine()
+        sm.onPlayTrackStarted()
+        sm.onUserStop()
+        assertFalse(sm.shouldFireCompletion())
+    }
+
+    @Test fun `new track resets state after previous track ended naturally`() {
+        val sm = machine()
+        sm.onPlayTrackStarted()
+        // Track 1 plays to completion (isManualStop stays false — normal)
+        assertTrue(sm.shouldFireCompletion())
+        // New track starts
+        sm.onPlayTrackStarted()
+        assertFalse("New track should not be manually stopped", sm.isManualStop)
+        assertTrue("New track should allow completion", sm.shouldFireCompletion())
+    }
+
+    @Test fun `FOCUS_GAIN after user-stop does NOT resume`() {
+        val sm = machine()
+        sm.onPlayTrackStarted()
+        sm.onUserStop()
+        sm.onAudioFocusChange(PlaybackStateMachine.FOCUS_GAIN)
+        assertEquals("Must not resume after user stop", 0, playCount)
+    }
+
+    @Test fun `rapid duck-unduck sequence is stable`() {
+        val sm = machine()
+        sm.onPlayTrackStarted()
+        repeat(5) {
+            sm.onAudioFocusChange(PlaybackStateMachine.FOCUS_CAN_DUCK)
+            sm.onAudioFocusChange(PlaybackStateMachine.FOCUS_GAIN)
+        }
+        assertEquals("Must not pause during duck cycles", 0, pauseCount)
+        assertEquals("Must not call play during duck cycles (engine already playing)", 0, playCount)
+    }
 }
