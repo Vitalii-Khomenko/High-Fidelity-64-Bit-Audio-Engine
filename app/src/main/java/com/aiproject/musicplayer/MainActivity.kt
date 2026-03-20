@@ -612,13 +612,21 @@ class MainActivity : ComponentActivity() {
                 }
 
                 // --- Sleep timer countdown and fade-out ---
+                // Battery optimisation: poll at 500 ms only during the last 30 s
+                // (fade window). Before that, sleep until ~30 s before the deadline
+                // so the CPU is not woken every 500 ms while the screen is off.
                 LaunchedEffect(sleepTimerEndMs) {
                     if (sleepTimerEndMs > 0L) {
                         val fadeStartMs = 30_000L
+                        // Long sleep until we enter the fade window
+                        val msUntilFade = (sleepTimerEndMs - fadeStartMs) - System.currentTimeMillis()
+                        if (msUntilFade > 1_000L) {
+                            delay(msUntilFade)
+                        }
+                        // Fine-grained 500 ms loop only in the last 30 seconds
                         while (true) {
                             val remaining = sleepTimerEndMs - System.currentTimeMillis()
                             if (remaining <= 0L) {
-                                // Stop playback
                                 if (isBound) {
                                     playbackService?.getEngine()?.pause()
                                     playbackService?.getEngine()?.setVolume(volume.toDouble())
@@ -627,7 +635,6 @@ class MainActivity : ComponentActivity() {
                                 sleepTimerDisplay = ""
                                 break
                             }
-                            // Fade out in last 30 seconds
                             if (remaining < fadeStartMs) {
                                 val fade = remaining.toDouble() / fadeStartMs.toDouble()
                                 if (isBound) playbackService?.getEngine()?.setVolume(volume * fade)
