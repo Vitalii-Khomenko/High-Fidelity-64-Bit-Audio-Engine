@@ -20,6 +20,10 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.material3.darkColorScheme
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -236,8 +240,15 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Draw behind system bars so Compose controls the full screen.
+        enableEdgeToEdge()
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        // White status-bar icons on the dark background
+        WindowInsetsControllerCompat(window, window.decorView)
+            .isAppearanceLightStatusBars = false
+
         setContent {
-            MaterialTheme {
+            MaterialTheme(colorScheme = darkColorScheme()) {
                 // --- Persistent state prefs ---
                 val statePrefs = remember { getSharedPreferences("player_state", MODE_PRIVATE) }
                 val coroutineScope = rememberCoroutineScope()

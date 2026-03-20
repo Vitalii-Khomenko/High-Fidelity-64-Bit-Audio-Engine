@@ -1,4 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <style name="Theme.MusicPlayerPro" parent="android:Theme.Material.Light.NoActionBar" />
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base dark theme — status bar icons rendered light-on-dark by the OS.
+         windowBackground matches the Compose dark surface so there is no
+         white flash on cold start before Compose draws its first frame. -->
+    <style name="Theme.MusicPlayerPro" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">false</item>
+    </style>
 </resources>
