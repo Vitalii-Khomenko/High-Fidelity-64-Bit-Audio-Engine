@@ -9,13 +9,13 @@ namespace dsp {
 
 /**
  * @brief Thread-safe 64-bit precision Gain and Volume controller.
- * 
- * Supports smooth, de-zippered interpolation between volume changes to avoid 
+ *
+ * Supports smooth, de-zippered interpolation between volume changes to avoid
  * audio artifacts (clicks) when adjustments happen in real time.
  */
 class GainProcessor : public IAudioProcessor {
 public:
-    GainProcessor() : m_gain(1.0), m_targetGain(1.0), m_smoothFactor(0.001) {}
+    GainProcessor() : m_gain(1.0), m_targetGain(1.0), m_replayGain(1.0), m_smoothFactor(0.001) {}
 
     void prepare(uint32_t sampleRate, size_t bufferSize) override {
         // Adjust smoothing depending on the sample rate.
@@ -28,7 +28,8 @@ public:
         const size_t numFrames = buffer.getNumFrames();
 
         double currentGain = m_gain.load(std::memory_order_acquire);
-        double targetGain = m_targetGain.load(std::memory_order_acquire);
+        double targetGain  = m_targetGain.load(std::memory_order_acquire)
+                           * m_replayGain.load(std::memory_order_relaxed);
 
         // If target gain matches current gain perfectly, no interpolation needed
         if (std::abs(currentGain - targetGain) < 1e-9) {
@@ -49,7 +50,7 @@ public:
             // A simple per-sample recursive smoothing
             for (size_t i = 0; i < numFrames; ++i) {
                 currentGain += (targetGain - currentGain) * m_smoothFactor;
-                
+
                 for (size_t ch = 0; ch < numChannels; ++ch) {
                     double* channelData = buffer.getWritePointer(ch);
                     channelData[i] *= currentGain;
@@ -81,6 +82,14 @@ public:
         setGainLinear(std::pow(10.0, dB / 20.0));
     }
 
+    void setReplayGainDb(float db) {
+        m_replayGainDb = db;
+        double linear = std::pow(10.0, db / 20.0);
+        linear = std::max(0.125, std::min(8.0, linear));
+        m_replayGain.store(linear, std::memory_order_release);
+    }
+    float getReplayGainDb() const { return m_replayGainDb; }
+
     /**
      * @brief Apply smoothed gain to a raw interleaved buffer (used by speed-change path).
      *        Processes exactly numFrames * numChannels samples with the same smoothing
@@ -90,7 +99,8 @@ public:
         if (!data || numFrames == 0) return;
 
         double currentGain = m_gain.load(std::memory_order_acquire);
-        double targetGain  = m_targetGain.load(std::memory_order_acquire);
+        double targetGain  = m_targetGain.load(std::memory_order_acquire)
+                           * m_replayGain.load(std::memory_order_relaxed);
 
         if (std::abs(currentGain - targetGain) < 1e-9) {
             if (std::abs(currentGain - 1.0) >= 1e-9) {
@@ -113,7 +123,9 @@ public:
 private:
     std::atomic<double> m_gain;
     std::atomic<double> m_targetGain;
-    double m_smoothFactor;
+    std::atomic<double> m_replayGain;
+    float               m_replayGainDb{0.0f};
+    double              m_smoothFactor;
 };
 
 } // namespace dsp

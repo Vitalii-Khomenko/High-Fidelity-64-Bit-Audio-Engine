@@ -58,6 +58,14 @@ class PlaybackService : Service() {
     /** Called on Main thread when a track ends naturally (not paused/stopped by user). */
     var onTrackCompleted: (() -> Unit)? = null
 
+    /** Provides the next track URI for gapless pre-loading. Returns null if no next track. */
+    var nextTrackProvider: (() -> Uri?)? = null
+
+    /** Called on Main thread when a gapless track advance occurs (no stop/start — just metadata update). */
+    var onGaplessAdvanced: (() -> Unit)? = null
+
+    private var gaplessJob: Job? = null
+
     private var isManualStop  = false
     private var completionJob: Job? = null
     private var fadeJob:       Job? = null
@@ -133,8 +141,10 @@ class PlaybackService : Service() {
     fun stopPlayback() {
         isManualStop = true
         completionJob?.cancel()
+        gaplessJob?.cancel()
         loadJob?.cancel()
         fadeJob?.cancel()
+        audioEngine.clearNextTrack()
         fadeJob = serviceScope.launch {
             fadeOut()
             audioEngine.seekTo(0.0)
@@ -218,6 +228,36 @@ class PlaybackService : Service() {
                     delay(300)
                 }
             }
+
+            // Gapless pre-load: start loading next track when ~8 s remain
+            gaplessJob?.cancel()
+            gaplessJob = serviceScope.launch {
+                delay(3000L) // wait for track to settle
+                var preloaded = false
+                while (!isManualStop) {
+                    // Check for gapless advance (C++ switched decoder seamlessly)
+                    if (audioEngine.pollGaplessAdvanced()) {
+                        onGaplessAdvanced?.invoke()
+                        preloaded = false
+                        delay(3000L)
+                    }
+                    // Pre-load next track when ~8 s remain
+                    if (!preloaded) {
+                        val dur = audioEngine.getDurationMs()
+                        val pos = audioEngine.getPositionMs()
+                        if (dur > 0 && (dur - pos) in 2000.0..9000.0) {
+                            val nextUri = nextTrackProvider?.invoke()
+                            if (nextUri != null) {
+                                withContext(Dispatchers.IO) {
+                                    audioEngine.loadNextTrack(nextUri, this@PlaybackService)
+                                }
+                                preloaded = true
+                            }
+                        }
+                    }
+                    delay(400L)
+                }
+            }
         }
     }
 
@@ -226,6 +266,7 @@ class PlaybackService : Service() {
     fun pausePlayback() {
         isManualStop = true
         completionJob?.cancel()
+        gaplessJob?.cancel()
         fadeJob?.cancel()
         fadeJob = serviceScope.launch {
             fadeOut()

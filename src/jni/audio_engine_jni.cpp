@@ -6,6 +6,7 @@
 #include "../decoders/FlacDecoder.h"
 #include "../decoders/Mp3Decoder.h"
 #include "../decoders/WavDecoder.h"
+#include "../decoders/ReplayGainScanner.h"
 
 static std::unique_ptr<audio_engine::core::AudioPlayer> g_player;
 
@@ -26,8 +27,8 @@ extern "C" JNIEXPORT jboolean JNICALL
 Java_com_aiproject_musicplayer_AudioEngine_loadFileFd(JNIEnv*, jobject, jint fd) {
     if (!g_player) return JNI_FALSE;
 
-    // Try each format; each decoder dup()-s the fd, so we must reset the
-    // file position between attempts and close the original fd at the end.
+    // Scan ReplayGain tag before format detection (both use lseek+read internally)
+    float rgDb = audio_engine::decoders::scanReplayGainDb(fd);
 
     std::unique_ptr<audio_engine::decoders::IAudioDecoder> decoder;
 
@@ -36,25 +37,25 @@ Java_com_aiproject_musicplayer_AudioEngine_loadFileFd(JNIEnv*, jobject, jint fd)
     if (decoder->openFd(fd)) {
         close(fd);
         g_player->setDecoder(std::move(decoder));
+        g_player->setReplayGainDb(rgDb);
         return JNI_TRUE;
     }
-
     lseek(fd, 0, SEEK_SET);
     decoder = std::make_unique<Mp3Decoder>();
     if (decoder->openFd(fd)) {
         close(fd);
         g_player->setDecoder(std::move(decoder));
+        g_player->setReplayGainDb(rgDb);
         return JNI_TRUE;
     }
-
     lseek(fd, 0, SEEK_SET);
     decoder = std::make_unique<WavDecoder>();
     if (decoder->openFd(fd)) {
         close(fd);
         g_player->setDecoder(std::move(decoder));
+        g_player->setReplayGainDb(rgDb);
         return JNI_TRUE;
     }
-
     close(fd);
     return JNI_FALSE;
 }
@@ -125,4 +126,57 @@ Java_com_aiproject_musicplayer_AudioEngine_getSampleRateNative(JNIEnv*, jobject)
 extern "C" JNIEXPORT jint JNICALL
 Java_com_aiproject_musicplayer_AudioEngine_getBitsPerSample(JNIEnv*, jobject) {
     return g_player ? static_cast<jint>(g_player->getBitsPerSample()) : 0;
+}
+
+// ---------------------------------------------------------------------------
+// Gapless: load next track into pre-load slot
+// ---------------------------------------------------------------------------
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_aiproject_musicplayer_AudioEngine_loadNextFileFd(JNIEnv*, jobject, jint fd) {
+    if (!g_player) { close(fd); return JNI_FALSE; }
+    float rgDb = audio_engine::decoders::scanReplayGainDb(fd);
+    std::unique_ptr<audio_engine::decoders::IAudioDecoder> decoder;
+    lseek(fd, 0, SEEK_SET);
+    decoder = std::make_unique<FlacDecoder>();
+    if (decoder->openFd(fd)) { close(fd); g_player->setNextDecoder(std::move(decoder), rgDb); return JNI_TRUE; }
+    lseek(fd, 0, SEEK_SET);
+    decoder = std::make_unique<Mp3Decoder>();
+    if (decoder->openFd(fd)) { close(fd); g_player->setNextDecoder(std::move(decoder), rgDb); return JNI_TRUE; }
+    lseek(fd, 0, SEEK_SET);
+    decoder = std::make_unique<WavDecoder>();
+    if (decoder->openFd(fd)) { close(fd); g_player->setNextDecoder(std::move(decoder), rgDb); return JNI_TRUE; }
+    close(fd);
+    return JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_aiproject_musicplayer_AudioEngine_clearNextTrack(JNIEnv*, jobject) {
+    if (g_player) g_player->clearNextDecoder();
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_aiproject_musicplayer_AudioEngine_pollGaplessAdvanced(JNIEnv*, jobject) {
+    return (g_player && g_player->pollGaplessAdvanced()) ? JNI_TRUE : JNI_FALSE;
+}
+
+// ---------------------------------------------------------------------------
+// Spectrum analyzer
+// ---------------------------------------------------------------------------
+extern "C" JNIEXPORT void JNICALL
+Java_com_aiproject_musicplayer_AudioEngine_getSpectrum(JNIEnv* env, jobject, jfloatArray jBands) {
+    if (!g_player) return;
+    jsize  count = env->GetArrayLength(jBands);
+    float* data  = env->GetFloatArrayElements(jBands, nullptr);
+    if (data) {
+        g_player->getSpectrumBands(data, static_cast<int>(count), g_player->getSampleRate());
+        env->ReleaseFloatArrayElements(jBands, data, 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ReplayGain query
+// ---------------------------------------------------------------------------
+extern "C" JNIEXPORT jfloat JNICALL
+Java_com_aiproject_musicplayer_AudioEngine_getReplayGainDb(JNIEnv*, jobject) {
+    return g_player ? g_player->getReplayGainDb() : 0.0f;
 }

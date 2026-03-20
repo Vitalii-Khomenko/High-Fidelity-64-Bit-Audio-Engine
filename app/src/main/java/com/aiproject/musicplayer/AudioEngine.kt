@@ -25,6 +25,11 @@ class AudioEngine {
     external fun getPositionMs(): Double
     external fun getSampleRateNative(): Int
     external fun getBitsPerSample(): Int
+    external fun loadNextFileFd(fd: Int): Boolean
+    external fun clearNextTrack()
+    external fun pollGaplessAdvanced(): Boolean
+    external fun getSpectrum(bands: FloatArray)
+    external fun getReplayGainDb(): Float
 
     fun playTrack(uri: Uri, context: Context) {
         try {
@@ -38,5 +43,13 @@ class AudioEngine {
         } catch (e: Exception) {
             e.printStackTrace()
         }
+    }
+
+    fun loadNextTrack(uri: Uri, context: Context): Boolean {
+        return try {
+            val pfd = context.contentResolver.openFileDescriptor(uri, "r")
+            val fd = pfd?.detachFd() ?: return false
+            loadNextFileFd(fd)
+        } catch (e: Exception) { false }
     }
 }

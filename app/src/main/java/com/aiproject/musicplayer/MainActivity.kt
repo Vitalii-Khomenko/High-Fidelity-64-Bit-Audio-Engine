@@ -21,9 +21,13 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -193,6 +197,8 @@ class MainActivity : ComponentActivity() {
                 var speedMult by remember { mutableFloatStateOf(1.0f) }
                 var sampleRateKhz by remember { mutableStateOf("") }
                 var bitDepth by remember { mutableStateOf("") }
+                var spectrumBands by remember { mutableStateOf(FloatArray(32)) }
+                var replayGainDb  by remember { mutableFloatStateOf(0f) }
 
                 // Repeat mode: 0=off  1=repeat one  2=repeat all
                 var repeatMode by remember { mutableIntStateOf(0) }
@@ -311,6 +317,26 @@ class MainActivity : ComponentActivity() {
                             if (prev >= 0)
                                 lifecycleScope.launch(Dispatchers.Main) { playAtIndex(prev) }
                         }
+                        playbackService?.nextTrackProvider = {
+                            val next = currentIndex + 1
+                            if (next in playlist.indices) playlist[next].uri else null
+                        }
+                        playbackService?.onGaplessAdvanced = {
+                            val next = currentIndex + 1
+                            if (next in playlist.indices) {
+                                // Save position of old track (it finished)
+                                if (currentIndex in playlist.indices)
+                                    clearTrackPosition(playlist[currentIndex].uri)
+                                currentIndex = next
+                                statePrefs.edit().putInt("current_index", next).apply()
+                                progressMs = 0f
+                                val track = playlist[next]
+                                if (track.uri.toString() !in playedUris) {
+                                    playedUris = playedUris + track.uri.toString()
+                                    prefs.edit().putStringSet("played_uris", playedUris).apply()
+                                }
+                            }
+                        }
                         // Track finished naturally → advance (respecting repeat mode)
                         playbackService?.onTrackCompleted = {
                             // Clear saved position for this track since it completed
@@ -386,6 +412,16 @@ class MainActivity : ComponentActivity() {
                                 if (sr > 0) sampleRateKhz = "%.1f kHz".format(sr / 1000.0)
                                 val bd = engine.getBitsPerSample()
                                 if (bd > 0) bitDepth = "$bd-bit"
+
+                                // Poll spectrum (every frame when playing)
+                                if (isPlaying) {
+                                    val bands = FloatArray(32)
+                                    engine.getSpectrum(bands)
+                                    spectrumBands = bands
+                                }
+                                // Read ReplayGain once per track load
+                                val rg = engine.getReplayGainDb()
+                                if (rg != replayGainDb) replayGainDb = rg
 
                                 // Save position every ~5 seconds while playing (audiobook resume)
                                 if (isPlaying && progressMs > 2000f) {
@@ -791,6 +827,15 @@ class MainActivity : ComponentActivity() {
                                             color = MaterialTheme.colorScheme.primary
                                         )
                                     }
+                                    if (replayGainDb != 0f) {
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            text = if (replayGainDb > 0f) "+%.1f dB".format(replayGainDb)
+                                                   else "%.1f dB".format(replayGainDb),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.tertiary
+                                        )
+                                    }
                                 }
 
                                 // Headset / audio device info bar
@@ -815,6 +860,31 @@ class MainActivity : ComponentActivity() {
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis
                                         )
+                                    }
+                                }
+
+                                // Spectrum analyzer bars
+                                if (isPlaying || spectrumBands.any { it > 0.02f }) {
+                                    Spacer(Modifier.height(4.dp))
+                                    Canvas(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(52.dp)
+                                    ) {
+                                        val bands = spectrumBands
+                                        val barW  = size.width / bands.size
+                                        bands.forEachIndexed { i, v ->
+                                            val barH = (v * size.height).coerceAtLeast(2f)
+                                            // Hue: 200° (blue-cyan) → 0° (red) based on amplitude
+                                            val hue = 200f * (1f - v)
+                                            drawRect(
+                                                color = androidx.compose.ui.graphics.Color.hsv(
+                                                    hue, 0.75f, 0.85f
+                                                ),
+                                                topLeft = Offset(i * barW + 1f, size.height - barH),
+                                                size    = Size(barW - 2f, barH)
+                                            )
+                                        }
                                     }
                                 }
 
