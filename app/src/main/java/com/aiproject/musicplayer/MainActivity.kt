@@ -231,6 +231,15 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         if (isBound) {
+            // Clear all callbacks stored on the long-lived Service so it no
+            // longer holds references to Compose lambdas (and thus the Activity).
+            // Without this, the GC cannot collect the Activity after rotation
+            // or system-initiated recreation.
+            playbackService?.skipToNextCallback     = null
+            playbackService?.skipToPreviousCallback = null
+            playbackService?.nextTrackProvider      = null
+            playbackService?.onGaplessAdvanced      = null
+            playbackService?.onTrackCompleted       = null
             unbindService(connection)
             isBound = false
         }
@@ -404,13 +413,23 @@ class MainActivity : ComponentActivity() {
                     if (isBound) {
                         lifecycleScope.launch {
                             try {
-                                // DLNA tracks have http:// URIs — download to cache before playing
+                                // DLNA tracks have http:// URIs — download to cache before playing.
+                                // Write to a .tmp file first, rename on success — a previously
+                                // interrupted download won't leave a corrupt cache file.
                                 val playUri = if (track.uri.scheme?.startsWith("http") == true) {
                                     withContext(Dispatchers.IO) {
                                         val cacheFile = File(cacheDir, "dlna_${track.uri.hashCode()}.audio")
                                         if (!cacheFile.exists()) {
-                                            URL(track.uri.toString()).openStream().use { input ->
-                                                cacheFile.outputStream().use { output -> input.copyTo(output) }
+                                            val tmpFile = File(cacheDir, "dlna_${track.uri.hashCode()}.tmp")
+                                            tmpFile.delete() // remove any previous partial download
+                                            try {
+                                                URL(track.uri.toString()).openStream().use { input ->
+                                                    tmpFile.outputStream().use { output -> input.copyTo(output) }
+                                                }
+                                                tmpFile.renameTo(cacheFile) // atomic on same partition
+                                            } catch (e: Exception) {
+                                                tmpFile.delete() // clean up partial file
+                                                throw e
                                             }
                                         }
                                         Uri.fromFile(cacheFile)
@@ -681,7 +700,7 @@ class MainActivity : ComponentActivity() {
                             val updated = playlist + newTracks
                             playlist = updated
                             savePlaylistToPrefs(updated)
-                            Toast.makeText(this@MainActivity, "Added ${newTracks.size} tracks (incl. subfolders)", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(applicationContext, "Added ${newTracks.size} tracks (incl. subfolders)", Toast.LENGTH_SHORT).show()
                         }
                     }
                 }
@@ -717,7 +736,7 @@ class MainActivity : ComponentActivity() {
                                             )
                                         }
                                     }
-                                    Toast.makeText(this@MainActivity, "Playlist \"$name\" saved", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(applicationContext, "Playlist \"$name\" saved", Toast.LENGTH_SHORT).show()
                                 }
                                 showCreatePlaylist = false
                                 playlistName = ""
@@ -952,7 +971,7 @@ class MainActivity : ComponentActivity() {
                                                         val updated = playlist + newTrack
                                                         playlist = updated
                                                         savePlaylistToPrefs(updated)
-                                                        Toast.makeText(this@MainActivity, "Added: ${track.title}", Toast.LENGTH_SHORT).show()
+                                                        Toast.makeText(applicationContext, "Added: ${track.title}", Toast.LENGTH_SHORT).show()
                                                     }
                                                 )
                                                 HorizontalDivider(thickness = 0.5.dp)
@@ -967,7 +986,7 @@ class MainActivity : ComponentActivity() {
                                                 val updated = playlist + newTracks
                                                 playlist = updated
                                                 savePlaylistToPrefs(updated)
-                                                Toast.makeText(this@MainActivity,
+                                                Toast.makeText(applicationContext,
                                                     "Added ${newTracks.size} tracks", Toast.LENGTH_SHORT).show()
                                                 dlnaShow = false
                                             },

@@ -241,6 +241,9 @@ private:
 
     // Write mono mix of a frame block into the spectrum circular buffer.
     void updateSpectrum(const double* interleaved, size_t frames, size_t channels) {
+        // Hold the spectrum mutex so getSpectrumBands() on another thread
+        // never reads a partially-written circular buffer (data race / UB).
+        std::lock_guard<std::mutex> lk(m_specMutex);
         for (size_t f = 0; f < frames; ++f) {
             float mono = 0.0f;
             for (size_t c = 0; c < channels; ++c)
