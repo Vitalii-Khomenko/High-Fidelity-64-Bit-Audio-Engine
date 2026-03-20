@@ -653,55 +653,60 @@ class MainActivity : ComponentActivity() {
 
                         // --- Player card ---
                         Card(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                         ) {
-                            Column(modifier = Modifier.padding(16.dp)) {
+                            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
 
-                                // Track name
-                                Text(
-                                    text = currentTrack?.name ?: "No track selected",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-
-                                // Metadata: sample rate + bit depth
-                                if (sampleRateKhz.isNotEmpty() || bitDepth.isNotEmpty()) {
-                                    Spacer(Modifier.height(2.dp))
-                                    Text(
-                                        text = listOf(sampleRateKhz, bitDepth)
-                                            .filter { it.isNotEmpty() }.joinToString(" · "),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                }
-
-                                Spacer(Modifier.height(12.dp))
-
-                                // Progress bar and timestamps
-                                val progStr = formatTime(progressMs)
-                                val durStr = formatTime(durationMs)
+                                // Track name + metadata on same row
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Text(progStr, style = MaterialTheme.typography.labelSmall)
-                                    Text(durStr, style = MaterialTheme.typography.labelSmall)
+                                    Text(
+                                        text = currentTrack?.name ?: "No track selected",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (sampleRateKhz.isNotEmpty() || bitDepth.isNotEmpty()) {
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            text = listOf(sampleRateKhz, bitDepth)
+                                                .filter { it.isNotEmpty() }.joinToString("·"),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
                                 }
-                                Slider(
-                                    value = progressMs,
-                                    onValueChange = { progressMs = it; isSeeking = true },
-                                    onValueChangeFinished = {
-                                        if (isBound) playbackService?.getEngine()?.seekTo(progressMs.toDouble())
-                                        isSeeking = false
-                                    },
-                                    valueRange = 0f..durationMs.coerceAtLeast(1f),
-                                    modifier = Modifier.fillMaxWidth()
-                                )
 
                                 Spacer(Modifier.height(4.dp))
+
+                                // Progress: time labels inline with slider
+                                val progStr = formatTime(progressMs)
+                                val durStr  = formatTime(durationMs)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(progStr, style = MaterialTheme.typography.labelSmall,
+                                        modifier = Modifier.width(36.dp))
+                                    Slider(
+                                        value = progressMs,
+                                        onValueChange = { progressMs = it; isSeeking = true },
+                                        onValueChangeFinished = {
+                                            if (isBound) playbackService?.getEngine()?.seekTo(progressMs.toDouble())
+                                            isSeeking = false
+                                        },
+                                        valueRange = 0f..durationMs.coerceAtLeast(1f),
+                                        modifier = Modifier.weight(1f).height(28.dp)
+                                    )
+                                    Text(durStr, style = MaterialTheme.typography.labelSmall,
+                                        modifier = Modifier.width(36.dp),
+                                        textAlign = androidx.compose.ui.text.style.TextAlign.End)
+                                }
 
                                 // Transport controls: Prev | Play/Pause | Next | Stop
                                 Row(
@@ -709,24 +714,18 @@ class MainActivity : ComponentActivity() {
                                     horizontalArrangement = Arrangement.SpaceEvenly,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    // Previous
                                     IconButton(
-                                        onClick = {
-                                            val prev = currentIndex - 1
-                                            if (prev >= 0) playAtIndex(prev)
-                                        },
+                                        onClick = { val prev = currentIndex - 1; if (prev >= 0) playAtIndex(prev) },
                                         enabled = currentIndex > 0
                                     ) {
-                                        Icon(Icons.Filled.SkipPrevious, contentDescription = "Previous", modifier = Modifier.size(36.dp))
+                                        Icon(Icons.Filled.SkipPrevious, contentDescription = "Previous", modifier = Modifier.size(30.dp))
                                     }
 
-                                    // Play / Pause
                                     FilledIconButton(
                                         onClick = {
                                             if (isBound) {
                                                 if (isPlaying) {
                                                     playbackService?.pausePlayback()
-                                                    // Save position on pause for audiobook resume
                                                     statePrefs.edit()
                                                         .putFloat("saved_position_ms", progressMs)
                                                         .putInt("current_index", currentIndex)
@@ -738,49 +737,41 @@ class MainActivity : ComponentActivity() {
                                                 }
                                             }
                                         },
-                                        modifier = Modifier.size(56.dp)
+                                        modifier = Modifier.size(48.dp)
                                     ) {
                                         Icon(
                                             imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                                             contentDescription = if (isPlaying) "Pause" else "Play",
-                                            modifier = Modifier.size(32.dp)
+                                            modifier = Modifier.size(28.dp)
                                         )
                                     }
 
-                                    // Next
                                     IconButton(
-                                        onClick = {
-                                            val next = currentIndex + 1
-                                            if (next in playlist.indices) playAtIndex(next)
-                                        },
+                                        onClick = { val next = currentIndex + 1; if (next in playlist.indices) playAtIndex(next) },
                                         enabled = currentIndex < playlist.size - 1
                                     ) {
-                                        Icon(Icons.Filled.SkipNext, contentDescription = "Next", modifier = Modifier.size(36.dp))
+                                        Icon(Icons.Filled.SkipNext, contentDescription = "Next", modifier = Modifier.size(30.dp))
                                     }
 
-                                    // Stop
                                     IconButton(onClick = {
-                                        if (isBound) {
-                                            playbackService?.stopPlayback()
-                                        }
-                                        isPlaying = false
-                                        progressMs = 0f
+                                        if (isBound) playbackService?.stopPlayback()
+                                        isPlaying = false; progressMs = 0f
                                     }) {
-                                        Icon(Icons.Filled.Stop, contentDescription = "Stop", modifier = Modifier.size(28.dp))
+                                        Icon(Icons.Filled.Stop, contentDescription = "Stop", modifier = Modifier.size(24.dp))
                                     }
                                 }
-
-                                Spacer(Modifier.height(8.dp))
 
                                 var showAdvanced by remember { mutableStateOf(false) }
 
                                 TextButton(
                                     onClick = { showAdvanced = !showAdvanced },
-                                    modifier = Modifier.fillMaxWidth()
+                                    modifier = Modifier.fillMaxWidth().height(28.dp),
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
                                 ) {
                                     Text(
-                                        if (showAdvanced) "▲ Hide controls" else "▼ Speed / Volume",
-                                        style = MaterialTheme.typography.labelSmall
+                                        if (showAdvanced) "▲ speed / volume" else "▼ speed / volume",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
                                     )
                                 }
 
@@ -825,7 +816,7 @@ class MainActivity : ComponentActivity() {
                         // --- Playlist ---
                         Row(
                             modifier = Modifier
-                                .padding(horizontal = 16.dp, vertical = 4.dp)
+                                .padding(horizontal = 12.dp, vertical = 2.dp)
                                 .fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically

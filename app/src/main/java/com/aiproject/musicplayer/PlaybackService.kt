@@ -171,8 +171,12 @@ class PlaybackService : Service() {
                     audioEngine.playTrack(uri, context)
                 }
             }
-            // Restore volume after new track loads
-            audioEngine.setVolume(currentVolume)
+            // Fade in: ramp volume from 0 → currentVolume over 250 ms (12 steps × 20 ms)
+            val fadeSteps = 12
+            for (step in 1..fadeSteps) {
+                audioEngine.setVolume(currentVolume * step / fadeSteps)
+                delay(20)
+            }
             val durationMs = try { audioEngine.getDurationMs().toLong() } catch (_: Exception) { 0L }
             mediaSession.setMetadata(
                 MediaMetadataCompat.Builder()
