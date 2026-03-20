@@ -79,7 +79,7 @@ Android's standard `AudioTrack` has 20–50 ms latency and introduces its own re
 - **Foreground service** — audio continues when screen is off or app is minimized
 - **MediaSession + MediaStyle notification** — lock-screen and notification-shade controls with Previous / Play-Pause / Next; progress bar auto-advances without polling
 - **Hardware media button support** — headset buttons, Bluetooth remotes, car audio via `MediaButtonReceiver`
-- **Audio focus** — pauses on phone calls / navigation prompts, resumes after
+- **Audio focus** — full `AudioFocusRequest` state machine: pauses with fade-out on phone calls / navigation / microphone use; automatically resumes with fade-in when the other app finishes; smooth duck (−80%) for notification sounds without interrupting playback
 - **Stops on swipe-away** — when user removes app from recents, playback stops and notification is cleared
 - **Async loading** — `Dispatchers.IO` coroutine + `Mutex` serializes JNI loads; UI is always responsive
 
@@ -98,7 +98,7 @@ Android's standard `AudioTrack` has 20–50 ms latency and introduces its own re
 - Access via **⋮ → Browse Network (DLNA)** — scan starts automatically on open
 
 ### Playlist Management
-- **Add Folder** — grant persistent URI permission to any folder; loads on every restart automatically
+- **Add Folder** — grant persistent URI permission once to a root folder; **all subfolders are scanned recursively** (up to 10 levels deep) and added automatically — one permission tap covers your entire music library
 - **Scan MediaStore** — discover all audio files on the device
 - **Save / Load / Rename / Delete** playlists — backed by Room SQLite database
 - **Folder path** shown under each track name in the playlist
@@ -123,7 +123,7 @@ Android's standard `AudioTrack` has 20–50 ms latency and introduces its own re
 │  ├─ FlacDecoder       ├─ GainProcessor (anti-zipper)          │
 │  ├─ Mp3Decoder        ├─ BiquadFilter  (7-type EQ)            │
 │  ├─ WavDecoder        └─► RingBuffer<double>  (lock-free)     │
-│  └─ DsdDecoder (stub)                                         │
+│  └─ DsdDecoder (DSF + DFF, 16× decimation)                    │
 └────────────────────────┬─────────────────────────────────────┘
                          │ Oboe audio callback
 ┌────────────────────────▼─────────────────────────────────────┐
@@ -232,14 +232,23 @@ The Oboe stream is created once at engine startup and kept alive for the entire 
 Between tracks, only the `IAudioDecoder` pointer is swapped. This eliminates the click artifacts, ~100 ms startup latency, and occasional `AAUDIO_ERROR_TIMEOUT` errors that occur when closing and reopening a stream per track.
 
 ### Anti-Click Track Transitions
+Every track switch follows a strict crossfade sequence — no abrupt cuts, no hardware pops:
 ```
-Old track ends / user presses Next
-  → setVolume(0.0) on main thread
-  → coroutine: delay(80 ms)           ← GainProcessor anti-zipper reaches 0
-  → audioEngine.playTrack()           ← new decoder initialized at silence
-  → seekTo(savedPositionMs)           ← restore chapter bookmark if any
-  → fade-in loop: 0→100% in 300 ms   ← smooth entry
+User taps track / autoadvance / Next button
+  │
+  ▼ coroutine starts — old track still playing at full volume
+  fade-out loop:  100% → 0%  over 200 ms  (10 steps × 20 ms)
+  audioEngine.pause()                      ← engine stops cleanly at silence
+  │                                           GainProcessor is fully at zero
+  ▼ IO thread (no UI block)
+  loadMutex.withLock { audioEngine.playTrack(uri) }  ← new decoder loaded at silence
+  seekTo(savedPositionMs)                  ← restore chapter bookmark if any
+  │
+  ▼ fade-in loop:  0% → 100%  over 300 ms  (15 steps × 20 ms)
+  ← new track audible, no click, no gap
 ```
+The `GainProcessor` anti-zipper smoothing ensures that even if the OS pre-empts the fade
+loop between steps, the hardware output never changes by more than one smoothing step at a time.
 
 ### Per-Track Audiobook Bookmarks
 Each track's resume position is stored independently under key `pos_${uri.hashCode()}` in SharedPreferences. When switching chapters, the current position is saved before unloading. When returning to a chapter, `startPositionMs` is passed directly into the native `playTrack()` call, and the seek happens inside the C++ engine before the fade-in starts — so playback always begins from exactly the right frame.
@@ -276,7 +285,7 @@ MusicPlayerPro/
     │   ├── Mp3Decoder.h           # dr_mp3 + VBR double-init fix
     │   ├── FlacDecoder.h          # dr_flac — lossless 32-bit/192 kHz
     │   ├── WavDecoder.h           # dr_wav — PCM + IEEE float
-    │   └── DsdDecoder.h           # DSD stub — DoP/raw architecture placeholder
+    │   └── DsdDecoder.h           # DSF + DSDIFF decoder — 16× box-filter decimation → PCM
     ├── dsp/
     │   ├── GainProcessor.h        # Anti-zipper volume smoothing
     │   └── BiquadFilter.h         # All 7 RBJ EQ Cookbook filter types
@@ -287,6 +296,43 @@ MusicPlayerPro/
     └── jni/
         └── audio_engine_jni.cpp   # JNI bridge: fd-based loading · play/pause/seek/speed
 ```
+
+---
+
+## Unit Test Suite
+
+Critical logic is covered by **68 pure-JVM unit tests** that run without a device or emulator:
+
+```bash
+./gradlew test          # ~15 seconds, no device needed
+```
+
+| Test class | Tests | What it guards |
+|---|---|---|
+| `PlaybackStateMachineTest` | 22 | Audio focus state machine — every bug from production is a named test |
+| `PlaylistNavigatorTest` | 18 | Repeat off/one/all · next/prev · boundary conditions · single-track edge cases |
+| `VolumeRampTest` | 15 | Fade-in ends at target · fade-out ends at 0 · duck math · step counts |
+| `DsdInfoTest` | 13 | DSD64/128/256/512 label correctness · boundary rates · `isDsd()` helper |
+
+### Named regression tests (bugs that already happened)
+
+| Test name | Bug it prevents |
+|---|---|
+| `BUG track-stops-after-1sec` | `requestAudioFocus()` must abandon old request first or Android fires LOSS on the new track |
+| `BUG mic-triggers-next-song` | `AUDIOFOCUS_LOSS_TRANSIENT` must set `isManualStop=true` or `completionJob` fires `onTrackCompleted` |
+| `BUG voice-msg-stops-song` | `AUDIOFOCUS_LOSS` must keep `pausedByFocus=true` and NOT abandon focus, or auto-resume never fires |
+| `BUG ui-playing-no-sound` | `AUDIOFOCUS_GAIN` must call `play()` when `pausedByFocus=true`, not just `setVolume()` |
+| `BUG DSD128 must NOT be labelled DSD256` | Threshold off-by-one in DSD label `when` block |
+| `BUG DSD256 must NOT be labelled DSD512` | Same threshold bug, one tier up |
+
+### Logic classes under test
+
+| Class | Purpose |
+|---|---|
+| `PlaybackStateMachine` | Audio focus transitions, `isManualStop`, `shouldFireCompletion()` |
+| `PlaylistNavigator` | Next/prev index with repeat mode, `advance()`, `jumpTo()` |
+| `VolumeRamp` | `fadeIn()`, `fadeOut()`, `duckLevel()` — pure math, no Android |
+| `DsdInfo` | `label(nativeRateHz)`, `isDsd()` |
 
 ---
 
