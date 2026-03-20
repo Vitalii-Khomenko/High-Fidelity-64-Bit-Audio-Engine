@@ -642,7 +642,7 @@ class MainActivity : ComponentActivity() {
                             val updated = playlist + newTracks
                             playlist = updated
                             savePlaylistToPrefs(updated)
-                            Toast.makeText(this@MainActivity, "Added ${newTracks.size} tracks", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this@MainActivity, "Added ${newTracks.size} tracks (incl. subfolders)", Toast.LENGTH_SHORT).show()
                         }
                     }
                 }
@@ -1029,7 +1029,16 @@ class MainActivity : ComponentActivity() {
                                     onDismissRequest = { showMenu = false }
                                 ) {
                                     DropdownMenuItem(
-                                        text = { Text("Add Folder") },
+                                        text = {
+                                            Column {
+                                                Text("Add Folder")
+                                                Text(
+                                                    "Subfolders included automatically",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                        },
                                         leadingIcon = { Icon(Icons.Filled.FolderOpen, null) },
                                         onClick = { showMenu = false; folderPickerLauncher.launch(null) }
                                     )
@@ -1515,13 +1524,25 @@ class MainActivity : ComponentActivity() {
         } catch (_: Exception) { "" }
     }
 
-    private fun loadTracksFromTree(treeUri: Uri): List<AudioTrack> {
+    /**
+     * Recursively scans [treeUri] (and all subdirectories up to [depth] levels deep).
+     * One call from the top — Android's persisted tree permission covers all children,
+     * so no extra permission prompts for subfolders.
+     *
+     * [docId]        — current directory document ID (default = tree root)
+     * [folderLabel]  — display name shown in the playlist for tracks in this directory
+     * [depth]        — recursion guard (max 10 levels)
+     */
+    private fun loadTracksFromTree(
+        treeUri: Uri,
+        docId: String = DocumentsContract.getTreeDocumentId(treeUri),
+        folderLabel: String = folderNameFromTreeUri(treeUri),
+        depth: Int = 0
+    ): List<AudioTrack> {
+        if (depth > 10) return emptyList()
         val result = mutableListOf<AudioTrack>()
-        val folderName = folderNameFromTreeUri(treeUri)
         try {
-            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
-                treeUri, DocumentsContract.getTreeDocumentId(treeUri)
-            )
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId)
             contentResolver.query(
                 childrenUri,
                 arrayOf(
@@ -1534,14 +1555,21 @@ class MainActivity : ComponentActivity() {
                 val nameCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
                 val mimeCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
                 while (cursor.moveToNext()) {
-                    val mime = cursor.getString(mimeCol) ?: continue
-                    val name  = cursor.getString(nameCol) ?: ""
-                    val isDsd = name.endsWith(".dsf", ignoreCase = true) || name.endsWith(".dff", ignoreCase = true)
-                    if (mime.startsWith("audio/") || isDsd) {
-                        val docId = cursor.getString(idCol)
-                        val name  = cursor.getString(nameCol) ?: docId
-                        val uri   = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
-                        result.add(AudioTrack(uri, name, folderName))
+                    val childId = cursor.getString(idCol) ?: continue
+                    val name    = cursor.getString(nameCol) ?: ""
+                    val mime    = cursor.getString(mimeCol) ?: ""
+                    when {
+                        // Subdirectory — recurse, using this directory's name as the folder label
+                        mime == DocumentsContract.Document.MIME_TYPE_DIR -> {
+                            result += loadTracksFromTree(treeUri, childId, name, depth + 1)
+                        }
+                        // Audio file (by MIME or extension for DSD)
+                        mime.startsWith("audio/") ||
+                        name.endsWith(".dsf", ignoreCase = true) ||
+                        name.endsWith(".dff", ignoreCase = true) -> {
+                            val fileUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, childId)
+                            result.add(AudioTrack(fileUri, name, folderLabel))
+                        }
                     }
                 }
             }
