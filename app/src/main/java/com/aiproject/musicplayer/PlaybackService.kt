@@ -65,6 +65,7 @@ class PlaybackService : Service() {
     var onGaplessAdvanced: (() -> Unit)? = null
 
     private var gaplessJob: Job? = null
+    private var duckJob:    Job? = null
 
     private var isManualStop  = false
     private var completionJob: Job? = null
@@ -290,34 +291,119 @@ class PlaybackService : Service() {
                 .build()
             audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(attrs)
+                .setWillPauseWhenDucked(false)   // we handle ducking ourselves via listener
                 .setOnAudioFocusChangeListener { change ->
                     when (change) {
                         AudioManager.AUDIOFOCUS_LOSS -> {
-                            pausedByFocusLoss = false
-                            audioEngine.pause()
-                            updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
-                            if (currentTitle.isNotEmpty()) showNotification(currentTitle, false)
-                            abandonAudioFocus()
-                        }
-                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                            if (audioEngine.isPlaying()) {
-                                pausedByFocusLoss = true
-                                audioEngine.pause()
+                            // Loss (e.g. voice message app, call, another player).
+                            // Keep focus request alive so we get AUDIOFOCUS_GAIN when
+                            // the other app finishes — then auto-resume.
+                            pausedByFocusLoss = true
+                            isManualStop = true
+                            completionJob?.cancel()
+                            gaplessJob?.cancel()
+                            fadeJob?.cancel()
+                            fadeJob = serviceScope.launch {
+                                fadeOut()
                                 updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
                                 if (currentTitle.isNotEmpty()) showNotification(currentTitle, false)
+                                // Do NOT abandonAudioFocus — we want AUDIOFOCUS_GAIN when they finish
                             }
                         }
-                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK ->
-                            audioEngine.setVolume(0.3)
+                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                            // Transient loss (e.g. microphone, navigation, call):
+                            // pause but keep focus so AUDIOFOCUS_GAIN resumes us.
+                            if (audioEngine.isPlaying()) {
+                                pausedByFocusLoss = true
+                                isManualStop = true          // prevent completionJob from firing next track
+                                completionJob?.cancel()
+                                gaplessJob?.cancel()
+                                fadeJob?.cancel()
+                                fadeJob = serviceScope.launch {
+                                    fadeOut()
+                                    updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
+                                    if (currentTitle.isNotEmpty()) showNotification(currentTitle, false)
+                                    // Do NOT call abandonAudioFocus() — we rely on AUDIOFOCUS_GAIN
+                                }
+                            }
+                        }
+                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                            // Smooth duck to 20% over 150 ms (notification sound, GPS, etc.)
+                            duckJob?.cancel()
+                            duckJob = serviceScope.launch {
+                                for (step in 10 downTo 2) {
+                                    audioEngine.setVolume(currentVolume * step / 10.0 * 0.3)
+                                    delay(15)
+                                }
+                            }
+                        }
                         AudioManager.AUDIOFOCUS_GAIN -> {
                             if (pausedByFocusLoss) {
+                                // Resume playback after transient interruption
                                 pausedByFocusLoss = false
-                                audioEngine.setVolume(1.0)
-                                audioEngine.play()
-                                updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
-                                if (currentTitle.isNotEmpty()) showNotification(currentTitle, true)
+                                isManualStop = false
+                                fadeJob?.cancel()
+                                fadeJob = serviceScope.launch {
+                                    audioEngine.setVolume(0.0)
+                                    audioEngine.play()
+                                    for (step in 1..10) {
+                                        audioEngine.setVolume(currentVolume * step / 10.0)
+                                        delay(20)
+                                    }
+                                    updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
+                                    if (currentTitle.isNotEmpty()) showNotification(currentTitle, true)
+                                    // Restart completion monitoring (was cancelled on focus loss)
+                                    completionJob?.cancel()
+                                    completionJob = serviceScope.launch {
+                                        delay(500)
+                                        var wasPlaying = false
+                                        while (true) {
+                                            val playing = audioEngine.isPlaying()
+                                            if (playing) wasPlaying = true
+                                            if (wasPlaying && !playing && !isManualStop) {
+                                                onTrackCompleted?.invoke()
+                                                break
+                                            }
+                                            delay(300)
+                                        }
+                                    }
+                                }
+                            } else if (!audioEngine.isPlaying() && !isManualStop && currentTitle.isNotEmpty()) {
+                                // Safety net: engine unexpectedly stopped (race/duck edge case)
+                                // Resync audio and UI
+                                duckJob?.cancel()
+                                fadeJob?.cancel()
+                                fadeJob = serviceScope.launch {
+                                    audioEngine.setVolume(0.0)
+                                    audioEngine.play()
+                                    for (step in 1..10) {
+                                        audioEngine.setVolume(currentVolume * step / 10.0)
+                                        delay(15)
+                                    }
+                                    updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
+                                    completionJob?.cancel()
+                                    completionJob = serviceScope.launch {
+                                        delay(500)
+                                        var wasPlaying = false
+                                        while (true) {
+                                            val playing = audioEngine.isPlaying()
+                                            if (playing) wasPlaying = true
+                                            if (wasPlaying && !playing && !isManualStop) {
+                                                onTrackCompleted?.invoke(); break
+                                            }
+                                            delay(300)
+                                        }
+                                    }
+                                }
                             } else {
-                                audioEngine.setVolume(1.0)
+                                // Restore from duck — smooth ramp back to full volume
+                                duckJob?.cancel()
+                                duckJob = serviceScope.launch {
+                                    for (step in 3..10) {
+                                        audioEngine.setVolume(currentVolume * step / 10.0)
+                                        delay(15)
+                                    }
+                                }
                             }
                         }
                     }

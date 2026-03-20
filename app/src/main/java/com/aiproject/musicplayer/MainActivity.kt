@@ -612,15 +612,18 @@ class MainActivity : ComponentActivity() {
                     // Only load from persisted folder URIs if we don't have a saved playlist
                     if (playlist.isEmpty()) {
                         val persistedUris = contentResolver.persistedUriPermissions
-                        val loadedTracks = mutableListOf<AudioTrack>()
-                        for (permission in persistedUris) {
-                            try {
-                                if (permission.uri.toString().contains("tree")) {
-                                    loadedTracks += loadTracksFromTree(permission.uri)
+                        val loadedTracks = withContext(Dispatchers.IO) {
+                            val acc = mutableListOf<AudioTrack>()
+                            for (permission in persistedUris) {
+                                try {
+                                    if (permission.uri.toString().contains("tree")) {
+                                        acc += loadTracksFromTree(permission.uri)
+                                    }
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
                                 }
-                            } catch (e: Exception) {
-                                e.printStackTrace()
                             }
+                            acc
                         }
                         if (loadedTracks.isNotEmpty()) {
                             playlist = loadedTracks
@@ -632,13 +635,15 @@ class MainActivity : ComponentActivity() {
                 val folderPickerLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.OpenDocumentTree()
                 ) { uri: Uri? ->
-                    uri?.let {
-                        contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        val newTracks = loadTracksFromTree(it)
-                        val updated = playlist + newTracks
-                        playlist = updated
-                        savePlaylistToPrefs(updated)
-                        Toast.makeText(this@MainActivity, "Added ${newTracks.size} tracks", Toast.LENGTH_SHORT).show()
+                    uri?.let { folderUri ->
+                        contentResolver.takePersistableUriPermission(folderUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        lifecycleScope.launch {
+                            val newTracks = withContext(Dispatchers.IO) { loadTracksFromTree(folderUri) }
+                            val updated = playlist + newTracks
+                            playlist = updated
+                            savePlaylistToPrefs(updated)
+                            Toast.makeText(this@MainActivity, "Added ${newTracks.size} tracks", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
 
@@ -1033,18 +1038,20 @@ class MainActivity : ComponentActivity() {
                                         leadingIcon = { Icon(Icons.Filled.LibraryMusic, null) },
                                         onClick = {
                                             showMenu = false
-                                            val tracks = scanMediaStore()
-                                            playlist = tracks
-                                            savePlaylistToPrefs(tracks)
-                                            statePrefs.edit()
-                                                .remove("current_index")
-                                                .remove("saved_position_ms")
-                                                .apply()
-                                            Toast.makeText(
-                                                this@MainActivity,
-                                                "Found ${tracks.size} tracks",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
+                                            lifecycleScope.launch {
+                                                val tracks = withContext(Dispatchers.IO) { scanMediaStore() }
+                                                playlist = tracks
+                                                savePlaylistToPrefs(tracks)
+                                                statePrefs.edit()
+                                                    .remove("current_index")
+                                                    .remove("saved_position_ms")
+                                                    .apply()
+                                                Toast.makeText(
+                                                    this@MainActivity,
+                                                    "Found ${tracks.size} tracks",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
                                         }
                                     )
                                     HorizontalDivider()
