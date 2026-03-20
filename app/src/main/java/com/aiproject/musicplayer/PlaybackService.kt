@@ -284,6 +284,10 @@ class PlaybackService : Service() {
     // ── Audio focus ──────────────────────────────────────────────────────────
 
     private fun requestAudioFocus(): Boolean {
+        // Silently drop the old request before creating a new one.
+        // Without this, Android fires AUDIOFOCUS_LOSS on the OLD listener when
+        // the new AUDIOFOCUS_GAIN request arrives — causing the new track to stop.
+        abandonAudioFocus()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val attrs = AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_MEDIA)
