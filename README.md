@@ -15,7 +15,7 @@ HiFi Player is built differently, from the ground up:
 |---|---|---|
 | **DSP precision** | 32-bit float or 16-bit int | **64-bit double** throughout the entire pipeline |
 | **Audio path** | Android MediaPlayer → Java AudioTrack → mixer → resampling | **Native C++ → Oboe → hardware HAL**, bypassing the Java audio stack |
-| **Between-track gap** | Stream closed and reopened per track (clicks, dropouts) | **Oboe stream stays alive for the entire session** — zero gap |
+| **Between-track gap** | Stream closed and reopened per track (clicks, dropouts) | **Oboe stream stays alive + gapless pre-load** — decoder swapped atomically at EOF, literally zero gap |
 | **MP3 VBR handling** | Often silently truncated or seeks incorrectly | **Full VBR support** with double-init fix for files without Xing/Info header |
 | **Track switching** | Immediate cut — audible click | **200 ms fade-out + fade-in** on every transition |
 | **Audiobook resume** | Per-app, single position saved | **Per-track bookmarks** — every chapter remembers its own position independently |
@@ -50,6 +50,9 @@ Android's standard `AudioTrack` has 20–50 ms latency and introduces its own re
 - **Fade-in on track start** — 300 ms ramp from silence after every track load
 - **Pitch-transparent speed control** — linear interpolation in the decode loop, 0.5×–2.5×
 - **7-type parametric EQ** — RBJ EQ Cookbook BiquadFilter: LowPass, HighPass, BandPass, Notch, AllPass, LowShelf, HighShelf
+- **ReplayGain** — automatic loudness normalization; scans FLAC vorbis comments and MP3 ID3v2 for `REPLAYGAIN_TRACK_GAIN`; applied as a `GainProcessor` multiplier; displayed in UI as `±X.X dB`
+- **Gapless playback** — `m_nextDecoder` slot pre-loads the next track ~8 s before EOF; at EOF the C++ engine swaps decoders atomically with no stream interruption, no click, no silence
+- **Spectrum analyzer** — 2048-point Hann-windowed Cooley-Tukey FFT; 32 logarithmic bands with per-band attack/decay smoothing; rendered as a live hue-gradient bar chart (blue → red by amplitude)
 
 ### Supported Formats
 | Format | Decoder | Notes |
@@ -304,9 +307,9 @@ MusicPlayerPro/
 
 - [ ] Full DSD playback via USB isochronous transfer (libusb)
 - [ ] Bluetooth codec selection (LDAC / aptX HD) via `BluetoothA2dp` profile API
-- [ ] Gapless playback — pre-buffer next track while current is finishing
-- [ ] ReplayGain tag reading for automatic loudness normalization
-- [ ] Spectrum analyzer visualization using FFT on the ring buffer
+- [x] **Gapless playback** — `m_nextDecoder` slot in `AudioPlayer`; pre-loaded ~8 s before EOF; seamless C++ decoder swap with zero stream interruption
+- [x] **ReplayGain** — scans first 64 KB of FLAC/MP3 for `REPLAYGAIN_TRACK_GAIN` tag; applied automatically as a `GainProcessor` multiplier; displayed as `±X.X dB` in the player UI
+- [x] **Spectrum analyzer** — 2048-point Hann-windowed FFT (Cooley-Tukey radix-2); 32 logarithmic bands with attack/decay smoothing; rendered as a live gradient bar chart in the player card
 - [ ] DLNA / UPnP network source support
 
 ---
