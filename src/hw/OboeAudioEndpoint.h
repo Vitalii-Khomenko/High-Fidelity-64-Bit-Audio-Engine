@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <thread>
 #include <vector>
 #include <memory>
 #include <android/log.h>
@@ -124,9 +125,26 @@ public:
         return oboe::DataCallbackResult::Continue;
     }
 
-    void onErrorAfterClose(oboe::AudioStream* /*stream*/, oboe::Result error) override {
+    void onErrorAfterClose(oboe::AudioStream* stream, oboe::Result error) override {
         LOGE("Oboe stream error after close: %s", oboe::convertToText(error));
         m_streamRunning = false;
+        if (error == oboe::Result::ErrorDisconnected) {
+            // Audio device changed (screen recording, headphone unplug, BT switch).
+            // Restart the stream on a background thread — must NOT call Oboe
+            // synchronously from the error callback.
+            const int32_t sr  = stream->getSampleRate();
+            const int32_t ch  = stream->getChannelCount();
+            std::thread([this, sr, ch]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                terminateInternal();
+                if (!initialize(static_cast<uint32_t>(sr),
+                                static_cast<size_t>(ch))) {
+                    // Fallback: try default rate
+                    initialize(48000, 2);
+                }
+                LOGI("Oboe stream auto-reconnected after device change");
+            }).detach();
+        }
     }
 
 private:

@@ -174,29 +174,37 @@ class PlaybackService : Service() {
      * load runs at a time.
      */
     fun playTrack(uri: Uri, context: Context, title: String, startPositionMs: Double = 0.0) {
-        isManualStop = false
+        // Keep isManualStop = true during the fade-out so no stray completionJob
+        // callback can fire and advance to the next track mid-transition.
+        isManualStop = true
         completionJob?.cancel()
         gaplessJob?.cancel()
         fadeJob?.cancel()
-        // Do NOT cut volume here — abrupt setVolume(0) causes an audible click.
-        // The coroutine below fades out the old track smoothly first.
-        currentTitle = title
-        pausedByFocusLoss = false
-        requestAudioFocus()
-        // Signal intent immediately — don't wait for fade to finish
-        updatePlaybackState(PlaybackStateCompat.STATE_BUFFERING)
-        showNotification(title, true)
-
         loadJob?.cancel()
+
         loadJob = serviceScope.launch {
-            // ── Step 1: Smooth fade-out of the current track (200 ms, 10 × 20 ms) ──
-            // Ramps volume currentVolume → 0 without a hard click.
-            // GainProcessor's anti-zipper smoothing is fully at 0 by the time we finish.
-            for (step in 9 downTo 0) {
-                audioEngine.setVolume(currentVolume * step / 10.0)
-                delay(20)
+            // ── Step 1: Smooth fade-out of the current track (300 ms, 15 × 20 ms) ──
+            // Only fade if the engine is actually producing audio; avoids a
+            // confusing volume-ramp from 0 when starting from a stopped state.
+            if (audioEngine.isPlaying()) {
+                for (step in 14 downTo 0) {
+                    audioEngine.setVolume(currentVolume * step / 15.0)
+                    delay(20)
+                }
             }
-            audioEngine.pause()   // engine stops cleanly at silence
+            audioEngine.pause()              // engine stops cleanly at silence
+            audioEngine.setVolume(currentVolume) // restore level for GainProcessor
+
+            // ── Step 1b: Request audio focus AFTER fade — this prevents the
+            //    abandonAudioFocus() inside requestAudioFocus() from dispatching
+            //    an immediate AUDIOFOCUS_LOSS to our own listener while the audio
+            //    is still in mid-fade on some Android versions. ─────────────────
+            isManualStop = false
+            pausedByFocusLoss = false
+            currentTitle = title
+            requestAudioFocus()
+            updatePlaybackState(PlaybackStateCompat.STATE_BUFFERING)
+            showNotification(title, true)
 
             // ── Step 2: Load new decoder on IO thread ────────────────────────────
             loadMutex.withLock {

@@ -563,12 +563,19 @@ class MainActivity : ComponentActivity() {
                 // --- Spectrum / equalizer: dedicated 30-fps poll ---
                 // Kept separate from the 500 ms position loop so the visualiser
                 // animates smoothly without blocking other state updates.
+                // When paused/stopped, bars decay to zero instead of freezing
+                // on the last live frame.
                 LaunchedEffect(isBound) {
                     while (true) {
-                        if (isBound && isPlaying) {
-                            val bands = FloatArray(32)
-                            playbackService?.getEngine()?.getSpectrum(bands)
-                            spectrumBands = bands
+                        if (isBound) {
+                            if (isPlaying) {
+                                val bands = FloatArray(32)
+                                playbackService?.getEngine()?.getSpectrum(bands)
+                                spectrumBands = bands
+                            } else if (spectrumBands.any { it > 0.001f }) {
+                                // Smooth decay so bars animate down rather than snap to 0
+                                spectrumBands = FloatArray(32) { i -> spectrumBands[i] * 0.75f }
+                            }
                         }
                         delay(33) // ~30 fps
                     }
