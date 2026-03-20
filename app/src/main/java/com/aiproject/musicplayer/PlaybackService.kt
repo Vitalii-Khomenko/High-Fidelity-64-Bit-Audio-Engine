@@ -60,6 +60,7 @@ class PlaybackService : Service() {
 
     private var isManualStop  = false
     private var completionJob: Job? = null
+    private var fadeJob:       Job? = null
 
     fun getEngine(): AudioEngine = audioEngine
 
@@ -96,7 +97,9 @@ class PlaybackService : Service() {
 
     /** Stop playback and service when user swipes app away from recents. */
     override fun onTaskRemoved(rootIntent: Intent?) {
-        stopPlayback()
+        fadeJob?.cancel(); completionJob?.cancel(); loadJob?.cancel()
+        audioEngine.pause()
+        stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
@@ -115,16 +118,8 @@ class PlaybackService : Service() {
                         if (currentTitle.isNotEmpty()) showNotification(currentTitle, true)
                     }
                 }
-                override fun onPause() {
-                    isManualStop = true
-                    completionJob?.cancel()
-                    pausedByFocusLoss = false
-                    audioEngine.pause()
-                    updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
-                    abandonAudioFocus()
-                    if (currentTitle.isNotEmpty()) showNotification(currentTitle, false)
-                }
-                override fun onStop()            { stopPlayback() }
+                override fun onPause() { pausePlayback() }
+                override fun onStop()  { stopPlayback() }
                 override fun onSkipToNext()      { skipToNextCallback?.invoke() }
                 override fun onSkipToPrevious()  { skipToPreviousCallback?.invoke() }
                 override fun onSeekTo(pos: Long) { audioEngine.seekTo(pos.toDouble()) }
@@ -139,12 +134,25 @@ class PlaybackService : Service() {
         isManualStop = true
         completionJob?.cancel()
         loadJob?.cancel()
-        pausedByFocusLoss = false
+        fadeJob?.cancel()
+        fadeJob = serviceScope.launch {
+            fadeOut()
+            audioEngine.seekTo(0.0)
+            abandonAudioFocus()
+            updatePlaybackState(PlaybackStateCompat.STATE_STOPPED)
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        }
+    }
+
+    /** Smooth volume ramp to 0, then call audioEngine.pause(). ~200 ms. */
+    private suspend fun fadeOut() {
+        val steps = 10
+        for (step in steps - 1 downTo 0) {
+            audioEngine.setVolume(currentVolume * step / steps)
+            delay(20)
+        }
         audioEngine.pause()
-        audioEngine.seekTo(0.0)
-        abandonAudioFocus()
-        updatePlaybackState(PlaybackStateCompat.STATE_STOPPED)
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        audioEngine.setVolume(currentVolume) // restore level for next play
     }
 
     /**
@@ -154,10 +162,10 @@ class PlaybackService : Service() {
      * but the C++ decoder is serialised via [loadMutex] so only one native
      * load runs at a time.
      */
-    fun playTrack(uri: Uri, context: Context, title: String) {
+    fun playTrack(uri: Uri, context: Context, title: String, startPositionMs: Double = 0.0) {
         isManualStop = false
         completionJob?.cancel()
-        // Brief silence to prevent click/pop at track boundary
+        fadeJob?.cancel()
         audioEngine.setVolume(0.0)
         currentTitle = title
         pausedByFocusLoss = false
@@ -166,13 +174,21 @@ class PlaybackService : Service() {
 
         loadJob?.cancel()
         loadJob = serviceScope.launch {
+            // Wait for GainProcessor anti-zipper to fully reach 0 before loading new track.
+            // Without this delay the engine briefly outputs the old volume for ~50 ms.
+            delay(80)
             loadMutex.withLock {
                 withContext(Dispatchers.IO) {
                     audioEngine.playTrack(uri, context)
                 }
             }
-            // Fade in: ramp volume from 0 → currentVolume over 250 ms (12 steps × 20 ms)
-            val fadeSteps = 12
+            // Seek to saved chapter position before fade-in
+            if (startPositionMs > 2000.0) {
+                audioEngine.seekTo(startPositionMs)
+                delay(40)
+            }
+            // Fade in: ramp volume 0 → currentVolume over 300 ms (15 steps × 20 ms)
+            val fadeSteps = 15
             for (step in 1..fadeSteps) {
                 audioEngine.setVolume(currentVolume * step / fadeSteps)
                 delay(20)
@@ -210,12 +226,14 @@ class PlaybackService : Service() {
     fun pausePlayback() {
         isManualStop = true
         completionJob?.cancel()
-        pausedByFocusLoss = false
-        audioEngine.pause()
-        updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
-        abandonAudioFocus()
-        if (currentTitle.isNotEmpty()) showNotification(currentTitle, false)
-        // Save position on pause
+        fadeJob?.cancel()
+        fadeJob = serviceScope.launch {
+            fadeOut()
+            pausedByFocusLoss = false
+            updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
+            abandonAudioFocus()
+            if (currentTitle.isNotEmpty()) showNotification(currentTitle, false)
+        }
     }
 
     fun setPlaybackSpeed(speed: Double) { audioEngine.setSpeed(speed) }

@@ -6,6 +6,10 @@ import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
+import android.media.AudioFormat
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -22,6 +26,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -45,6 +50,66 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 data class AudioTrack(val uri: Uri, val name: String, val folder: String = "")
+
+data class HeadsetInfo(
+    val name: String,
+    val connectionType: String,   // "USB", "Bluetooth", "Wired", …
+    val maxSampleRateHz: Int,     // 0 = unknown
+    val maxBitDepth: Int,         // 0 = unknown
+    val channels: Int             // 0 = unknown
+) {
+    /** Short one-line description for the UI. */
+    val summary: String get() {
+        val parts = mutableListOf<String>()
+        if (maxSampleRateHz > 0) parts += "%.1f kHz".format(maxSampleRateHz / 1000.0)
+        if (maxBitDepth > 0)     parts += "$maxBitDepth-bit"
+        if (channels > 2)        parts += "${channels}ch"
+        return if (parts.isEmpty()) connectionType else "$connectionType · ${parts.joinToString(" / ")}"
+    }
+}
+
+/** Detect the highest-priority external audio output device and describe it. */
+fun detectHeadsetInfo(audioManager: AudioManager): HeadsetInfo? {
+    // Priority: USB DAC > USB headset > BT A2DP > BT LE > wired
+    val typePriority = listOf(
+        AudioDeviceInfo.TYPE_USB_DEVICE,
+        AudioDeviceInfo.TYPE_USB_HEADSET,
+        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+            AudioDeviceInfo.TYPE_BLE_HEADSET else -1,
+        AudioDeviceInfo.TYPE_WIRED_HEADSET,
+        AudioDeviceInfo.TYPE_WIRED_HEADPHONES
+    )
+    val outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+    val device = typePriority.firstNotNullOfOrNull { t ->
+        if (t < 0) null else outputs.find { it.type == t }
+    } ?: return null
+
+    val typeName = when (device.type) {
+        AudioDeviceInfo.TYPE_USB_DEVICE,
+        AudioDeviceInfo.TYPE_USB_HEADSET         -> "USB"
+        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP      -> "Bluetooth A2DP"
+        AudioDeviceInfo.TYPE_WIRED_HEADSET,
+        AudioDeviceInfo.TYPE_WIRED_HEADPHONES    -> "Wired"
+        else                                     -> "Bluetooth"
+    }
+
+    val maxSR = device.sampleRates.maxOrNull() ?: 0
+    val maxBits = device.encodings.maxOfOrNull { enc ->
+        when (enc) {
+            AudioFormat.ENCODING_PCM_8BIT         -> 8
+            AudioFormat.ENCODING_PCM_16BIT        -> 16
+            AudioFormat.ENCODING_PCM_24BIT_PACKED -> 24
+            AudioFormat.ENCODING_PCM_32BIT,
+            AudioFormat.ENCODING_PCM_FLOAT        -> 32
+            else -> 0
+        }
+    } ?: 0
+    val maxCh = device.channelCounts.maxOrNull() ?: 0
+    val name = device.productName?.toString()?.trim()?.ifEmpty { null } ?: typeName
+
+    return HeadsetInfo(name, typeName, maxSR, maxBits, maxCh)
+}
 
 class MainActivity : ComponentActivity() {
 
@@ -129,6 +194,36 @@ class MainActivity : ComponentActivity() {
                 var sampleRateKhz by remember { mutableStateOf("") }
                 var bitDepth by remember { mutableStateOf("") }
 
+                // Repeat mode: 0=off  1=repeat one  2=repeat all
+                var repeatMode by remember { mutableIntStateOf(0) }
+
+                // Per-track position bookmarks (key = URI hashcode)
+                fun saveTrackPosition(uri: Uri, posMs: Float) {
+                    if (posMs > 2000f)
+                        statePrefs.edit().putFloat("pos_${uri.hashCode()}", posMs).apply()
+                }
+                fun loadTrackPosition(uri: Uri): Float =
+                    statePrefs.getFloat("pos_${uri.hashCode()}", 0f)
+                fun clearTrackPosition(uri: Uri) {
+                    statePrefs.edit().remove("pos_${uri.hashCode()}").apply()
+                }
+
+                // Headset / audio device detection
+                val audioManager = remember { getSystemService(Context.AUDIO_SERVICE) as AudioManager }
+                var headsetInfo by remember { mutableStateOf(detectHeadsetInfo(audioManager)) }
+                DisposableEffect(Unit) {
+                    val callback = object : AudioDeviceCallback() {
+                        override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>) {
+                            headsetInfo = detectHeadsetInfo(audioManager)
+                        }
+                        override fun onAudioDevicesRemoved(removed: Array<out AudioDeviceInfo>) {
+                            headsetInfo = detectHeadsetInfo(audioManager)
+                        }
+                    }
+                    audioManager.registerAudioDeviceCallback(callback, null)
+                    onDispose { audioManager.unregisterAudioDeviceCallback(callback) }
+                }
+
                 // Played-track indicator — persisted in SharedPreferences by URI
                 // so it survives app restarts and Activity recreation.
                 // Useful for audiobooks: shows which chapters were already heard.
@@ -167,13 +262,15 @@ class MainActivity : ComponentActivity() {
                 fun playAtIndex(index: Int) {
                     if (index !in playlist.indices) return
                     if (isLoadingTrack) return
+                    // Save position of the track we're leaving
+                    if (currentIndex in playlist.indices && progressMs > 2000f)
+                        saveTrackPosition(playlist[currentIndex].uri, progressMs)
                     currentIndex = index
                     isPlaying = true
                     isLoadingTrack = true
-                    progressMs = 0f        // reset progress immediately so auto-advance can't re-fire
+                    progressMs = 0f
                     durationMs = 1f
-                    positionRestored = true // don't seek to saved pos when changing tracks manually
-                    // Persist index
+                    positionRestored = true
                     statePrefs.edit().putInt("current_index", index).apply()
                     val track = playlist[index]
                     val uriStr = track.uri.toString()
@@ -181,10 +278,14 @@ class MainActivity : ComponentActivity() {
                         playedUris = playedUris + uriStr
                         prefs.edit().putStringSet("played_uris", playedUris).apply()
                     }
+                    // Load saved chapter position for this track
+                    val resumePos = loadTrackPosition(track.uri)
                     if (isBound) {
                         lifecycleScope.launch {
                             try {
-                                playbackService?.playTrack(track.uri, this@MainActivity, track.name)
+                                playbackService?.playTrack(
+                                    track.uri, this@MainActivity, track.name, resumePos.toDouble()
+                                )
                                 playbackService?.setPlaybackSpeed(speedMult.toDouble())
                                 playbackService?.setVolume(volume.toDouble())
                             } finally {
@@ -210,20 +311,30 @@ class MainActivity : ComponentActivity() {
                             if (prev >= 0)
                                 lifecycleScope.launch(Dispatchers.Main) { playAtIndex(prev) }
                         }
-                        // Track finished naturally → advance to next
+                        // Track finished naturally → advance (respecting repeat mode)
                         playbackService?.onTrackCompleted = {
-                            val next = currentIndex + 1
-                            if (next in playlist.indices) {
-                                lifecycleScope.launch(Dispatchers.Main) { playAtIndex(next) }
-                            } else {
-                                // End of playlist
-                                isPlaying = false
-                                currentIndex = -1
-                                progressMs = 0f
-                                statePrefs.edit()
-                                    .remove("current_index")
-                                    .remove("saved_position_ms")
-                                    .apply()
+                            // Clear saved position for this track since it completed
+                            if (currentIndex in playlist.indices)
+                                clearTrackPosition(playlist[currentIndex].uri)
+                            when (repeatMode) {
+                                1 -> lifecycleScope.launch(Dispatchers.Main) {
+                                    // Repeat one — replay same track from start
+                                    playAtIndex(currentIndex)
+                                }
+                                2 -> lifecycleScope.launch(Dispatchers.Main) {
+                                    // Repeat all — loop around
+                                    val next = if (currentIndex + 1 < playlist.size) currentIndex + 1 else 0
+                                    playAtIndex(next)
+                                }
+                                else -> {
+                                    val next = currentIndex + 1
+                                    if (next in playlist.indices) {
+                                        lifecycleScope.launch(Dispatchers.Main) { playAtIndex(next) }
+                                    } else {
+                                        isPlaying = false; currentIndex = -1; progressMs = 0f
+                                        statePrefs.edit().remove("current_index").apply()
+                                    }
+                                }
                             }
                         }
                     }
@@ -658,7 +769,7 @@ class MainActivity : ComponentActivity() {
                         ) {
                             Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
 
-                                // Track name + metadata on same row
+                                // Track name + file metadata on same row
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     verticalAlignment = Alignment.CenterVertically
@@ -678,6 +789,31 @@ class MainActivity : ComponentActivity() {
                                                 .filter { it.isNotEmpty() }.joinToString("·"),
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
+
+                                // Headset / audio device info bar
+                                headsetInfo?.let { info ->
+                                    Spacer(Modifier.height(2.dp))
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        val (icon, tint) = when {
+                                            info.connectionType.startsWith("USB") ->
+                                                Icons.Filled.Usb to MaterialTheme.colorScheme.tertiary
+                                            info.connectionType.startsWith("Bluetooth") ->
+                                                Icons.Filled.BluetoothConnected to MaterialTheme.colorScheme.primary
+                                            else ->
+                                                Icons.Filled.Headphones to MaterialTheme.colorScheme.secondary
+                                        }
+                                        Icon(icon, contentDescription = null,
+                                            modifier = Modifier.size(12.dp), tint = tint)
+                                        Spacer(Modifier.width(4.dp))
+                                        Text(
+                                            text = "${info.name}  ·  ${info.summary}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
                                         )
                                     }
                                 }
@@ -754,10 +890,25 @@ class MainActivity : ComponentActivity() {
                                     }
 
                                     IconButton(onClick = {
+                                        if (currentIndex in playlist.indices && progressMs > 2000f)
+                                            saveTrackPosition(playlist[currentIndex].uri, progressMs)
                                         if (isBound) playbackService?.stopPlayback()
                                         isPlaying = false; progressMs = 0f
                                     }) {
                                         Icon(Icons.Filled.Stop, contentDescription = "Stop", modifier = Modifier.size(24.dp))
+                                    }
+
+                                    // Repeat mode: off → one → all → off
+                                    IconButton(onClick = { repeatMode = (repeatMode + 1) % 3 }) {
+                                        Icon(
+                                            imageVector = if (repeatMode == 1) Icons.Filled.RepeatOne else Icons.Filled.Repeat,
+                                            contentDescription = "Repeat",
+                                            modifier = Modifier.size(22.dp),
+                                            tint = if (repeatMode > 0)
+                                                MaterialTheme.colorScheme.primary
+                                            else
+                                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
+                                        )
                                     }
                                 }
 
@@ -867,7 +1018,17 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         } else {
-                            LazyColumn(modifier = Modifier.weight(1f)) {
+                            val listState = rememberLazyListState()
+                            // Auto-scroll to current track whenever it changes
+                            LaunchedEffect(currentIndex) {
+                                if (currentIndex >= 0 && currentIndex < playlist.size) {
+                                    listState.animateScrollToItem(
+                                        index = currentIndex,
+                                        scrollOffset = -120
+                                    )
+                                }
+                            }
+                            LazyColumn(state = listState, modifier = Modifier.weight(1f)) {
                                 itemsIndexed(playlist) { index, track ->
                                     val isCurrentTrack = index == currentIndex
                                     val isPlayed = index in playedIndices && !isCurrentTrack
