@@ -176,8 +176,10 @@ class PlaybackService : Service() {
     fun playTrack(uri: Uri, context: Context, title: String, startPositionMs: Double = 0.0) {
         isManualStop = false
         completionJob?.cancel()
+        gaplessJob?.cancel()
         fadeJob?.cancel()
-        audioEngine.setVolume(0.0)
+        // Do NOT cut volume here — abrupt setVolume(0) causes an audible click.
+        // The coroutine below fades out the old track smoothly first.
         currentTitle = title
         pausedByFocusLoss = false
         requestAudioFocus()
@@ -185,9 +187,16 @@ class PlaybackService : Service() {
 
         loadJob?.cancel()
         loadJob = serviceScope.launch {
-            // Wait for GainProcessor anti-zipper to fully reach 0 before loading new track.
-            // Without this delay the engine briefly outputs the old volume for ~50 ms.
-            delay(80)
+            // ── Step 1: Smooth fade-out of the current track (200 ms, 10 × 20 ms) ──
+            // Ramps volume currentVolume → 0 without a hard click.
+            // GainProcessor's anti-zipper smoothing is fully at 0 by the time we finish.
+            for (step in 9 downTo 0) {
+                audioEngine.setVolume(currentVolume * step / 10.0)
+                delay(20)
+            }
+            audioEngine.pause()   // engine stops cleanly at silence
+
+            // ── Step 2: Load new decoder on IO thread ────────────────────────────
             loadMutex.withLock {
                 withContext(Dispatchers.IO) {
                     audioEngine.playTrack(uri, context)
@@ -198,7 +207,7 @@ class PlaybackService : Service() {
                 audioEngine.seekTo(startPositionMs)
                 delay(40)
             }
-            // Fade in: ramp volume 0 → currentVolume over 300 ms (15 steps × 20 ms)
+            // ── Step 3: Smooth fade-in of the new track (300 ms, 15 × 20 ms) ─────
             val fadeSteps = 15
             for (step in 1..fadeSteps) {
                 audioEngine.setVolume(currentVolume * step / fadeSteps)
