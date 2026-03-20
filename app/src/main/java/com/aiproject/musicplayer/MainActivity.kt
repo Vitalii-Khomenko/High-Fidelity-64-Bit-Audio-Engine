@@ -366,6 +366,12 @@ class MainActivity : ComponentActivity() {
                 fun playAtIndex(index: Int) {
                     if (index !in playlist.indices) return
                     if (isLoadingTrack) return
+                    // Same track tapped while playing — just restart from beginning (no reload)
+                    if (index == currentIndex && playbackService?.getEngine()?.isPlaying() == true) {
+                        playbackService?.getEngine()?.seekTo(0.0)
+                        progressMs = 0f
+                        return
+                    }
                     // Save position of the track we're leaving
                     if (currentIndex in playlist.indices && progressMs > 2000f)
                         saveTrackPosition(playlist[currentIndex].uri, progressMs)
@@ -494,10 +500,16 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(isBound) {
                     if (isBound && !positionRestored && currentIndex >= 0) {
                         positionRestored = true
-                        val savedPos = statePrefs.getFloat("saved_position_ms", 0f)
-                        if (savedPos > 2000f) {  // only restore if more than 2 seconds in
-                            delay(800) // let the engine settle after binding
-                            playbackService?.getEngine()?.seekTo(savedPos.toDouble())
+                        val engine = playbackService?.getEngine() ?: return@LaunchedEffect
+                        // Only restore if engine is near the start — if the service is already
+                        // playing mid-track (activity recreated while service was live), seeking
+                        // to the stale saved position would cause an audible 1-second rollback.
+                        if (engine.getPositionMs() < 3000.0) {
+                            val savedPos = statePrefs.getFloat("saved_position_ms", 0f)
+                            if (savedPos > 2000f) {
+                                delay(800) // let the engine settle after binding
+                                engine.seekTo(savedPos.toDouble())
+                            }
                         }
                     }
                 }
@@ -523,12 +535,7 @@ class MainActivity : ComponentActivity() {
                                 val bd = engine.getBitsPerSample()
                                 if (bd > 0) bitDepth = "$bd-bit"
 
-                                // Poll spectrum (every frame when playing)
-                                if (isPlaying) {
-                                    val bands = FloatArray(32)
-                                    engine.getSpectrum(bands)
-                                    spectrumBands = bands
-                                }
+                                // (spectrum polled in dedicated 30-fps loop below)
                                 // Read ReplayGain once per track load
                                 val rg = engine.getReplayGainDb()
                                 if (rg != replayGainDb) replayGainDb = rg
@@ -550,6 +557,20 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                         delay(500)
+                    }
+                }
+
+                // --- Spectrum / equalizer: dedicated 30-fps poll ---
+                // Kept separate from the 500 ms position loop so the visualiser
+                // animates smoothly without blocking other state updates.
+                LaunchedEffect(isBound) {
+                    while (true) {
+                        if (isBound && isPlaying) {
+                            val bands = FloatArray(32)
+                            playbackService?.getEngine()?.getSpectrum(bands)
+                            spectrumBands = bands
+                        }
+                        delay(33) // ~30 fps
                     }
                 }
 
