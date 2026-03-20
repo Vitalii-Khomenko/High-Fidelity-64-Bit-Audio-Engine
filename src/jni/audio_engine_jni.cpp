@@ -7,6 +7,7 @@
 #include "../decoders/Mp3Decoder.h"
 #include "../decoders/WavDecoder.h"
 #include "../decoders/ReplayGainScanner.h"
+#include "../decoders/DsdDecoder.h"
 
 static std::unique_ptr<audio_engine::core::AudioPlayer> g_player;
 
@@ -54,6 +55,14 @@ Java_com_aiproject_musicplayer_AudioEngine_loadFileFd(JNIEnv*, jobject, jint fd)
         close(fd);
         g_player->setDecoder(std::move(decoder));
         g_player->setReplayGainDb(rgDb);
+        return JNI_TRUE;
+    }
+    lseek(fd, 0, SEEK_SET);
+    decoder = std::make_unique<audio_engine::decoders::DsdDecoder>();
+    if (decoder->openFd(fd)) {
+        close(fd);
+        g_player->setDecoder(std::move(decoder));
+        g_player->setReplayGainDb(0.0f); // DSD has no ReplayGain
         return JNI_TRUE;
     }
     close(fd);
@@ -179,4 +188,12 @@ Java_com_aiproject_musicplayer_AudioEngine_getSpectrum(JNIEnv* env, jobject, jfl
 extern "C" JNIEXPORT jfloat JNICALL
 Java_com_aiproject_musicplayer_AudioEngine_getReplayGainDb(JNIEnv*, jobject) {
     return g_player ? g_player->getReplayGainDb() : 0.0f;
+}
+
+// Returns the native DSD sample rate (e.g. 2822400 for DSD64, 5644800 for DSD128).
+// Returns 0 if the current track is not DSD.
+extern "C" JNIEXPORT jint JNICALL
+Java_com_aiproject_musicplayer_AudioEngine_getDsdNativeRate(JNIEnv*, jobject) {
+    if (!g_player) return 0;
+    return g_player->getDsdNativeRate();
 }

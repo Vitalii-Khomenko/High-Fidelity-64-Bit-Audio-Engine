@@ -30,6 +30,7 @@ class AudioEngine {
     external fun pollGaplessAdvanced(): Boolean
     external fun getSpectrum(bands: FloatArray)
     external fun getReplayGainDb(): Float
+    external fun getDsdNativeRate(): Int
 
     fun playTrack(uri: Uri, context: Context) {
         try {

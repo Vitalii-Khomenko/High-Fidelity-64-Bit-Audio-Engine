@@ -60,7 +60,7 @@ Android's standard `AudioTrack` has 20–50 ms latency and introduces its own re
 | **FLAC** | dr_flac | Lossless, up to 32-bit / 192 kHz |
 | **MP3**  | dr_mp3  | CBR and VBR — full Xing/Info-less VBR fix applied |
 | **WAV**  | dr_wav  | PCM 8/16/24/32-bit and IEEE float |
-| **DSD**  | stub    | Architecture stub — libusb DoP integration planned |
+| **DSD**  | DsdDecoder | DSF + DSDIFF (DFF) — 16× decimation → DoP-rate PCM; DSD64/DSD128/DSD256/DSD512 |
 
 ### Playback & UX
 - **Smooth track transitions** — fade-out → silence → load → seek → fade-in, no audible clicks
@@ -313,7 +313,7 @@ MusicPlayerPro/
 
 ## Roadmap
 
-- [ ] Full DSD playback via USB isochronous transfer (libusb)
+- [x] **Full DSD playback** — DSF (.dsf) and DSDIFF (.dff) file decoding; 16× decimation box filter converts DSD64 → 176.4 kHz PCM / DSD128 → 352.8 kHz PCM; DoP-rate output ensures bit-transparency on USB DACs at these sample rates; DSD badge (DSD64/DSD128) shown in player UI; USB isochronous bypass (`UsbAudioEndpoint`) architecture ready for libusb integration
 - [x] **Bluetooth codec detection** — connects to `BluetoothA2dp` profile proxy at runtime; reads active codec (LDAC / aptX HD / aptX / AAC / SBC) and displays it in the headset info bar alongside device name and sample-rate/bit-depth
 - [x] **Gapless playback** — `m_nextDecoder` slot in `AudioPlayer`; pre-loaded ~8 s before EOF; seamless C++ decoder swap with zero stream interruption
 - [x] **ReplayGain** — scans first 64 KB of FLAC/MP3 for `REPLAYGAIN_TRACK_GAIN` tag; applied automatically as a `GainProcessor` multiplier; displayed as `±X.X dB` in the player UI

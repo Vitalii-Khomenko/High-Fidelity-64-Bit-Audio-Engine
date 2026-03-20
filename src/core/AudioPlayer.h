@@ -17,6 +17,7 @@
 #include "../dsp/BiquadFilter.h"
 #include "../dsp/Fft.h"
 #include "../decoders/IAudioDecoder.h"
+#include "../decoders/DsdDecoder.h"
 #include "../hw/OboeAudioEndpoint.h"
 
 namespace audio_engine {
@@ -213,6 +214,12 @@ public:
     uint32_t getBitsPerSample() const {
         std::lock_guard<std::mutex> lk(m_decoderMutex);
         return m_decoder ? m_decoder->getBitsPerSample() : 0;
+    }
+    uint32_t getDsdNativeRate() const {
+        std::lock_guard<std::mutex> lk(m_decoderMutex);
+        if (!m_decoder) return 0;
+        auto* dsd = dynamic_cast<const decoders::DsdDecoder*>(m_decoder.get());
+        return dsd ? dsd->getDsdNativeRate() : 0;
     }
 
     // Returns true (once) if a gapless track advance just occurred.

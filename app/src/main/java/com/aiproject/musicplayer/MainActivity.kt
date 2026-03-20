@@ -276,6 +276,7 @@ class MainActivity : ComponentActivity() {
                 var bitDepth by remember { mutableStateOf("") }
                 var spectrumBands by remember { mutableStateOf(FloatArray(32)) }
                 var replayGainDb  by remember { mutableFloatStateOf(0f) }
+                var dsdNativeRate by remember { mutableIntStateOf(0) }
                 var bluetoothCodec by remember { mutableStateOf("") }
 
                 // DLNA / UPnP browser state
@@ -531,6 +532,9 @@ class MainActivity : ComponentActivity() {
                                 // Read ReplayGain once per track load
                                 val rg = engine.getReplayGainDb()
                                 if (rg != replayGainDb) replayGainDb = rg
+                                // DSD native rate (0 = not a DSD track)
+                                val dsr = engine.getDsdNativeRate()
+                                if (dsr != dsdNativeRate) dsdNativeRate = dsr
 
                                 // Save position every ~5 seconds while playing (audiobook resume)
                                 if (isPlaying && progressMs > 2000f) {
@@ -1121,6 +1125,28 @@ class MainActivity : ComponentActivity() {
                                             color = MaterialTheme.colorScheme.tertiary
                                         )
                                     }
+                                    if (dsdNativeRate > 0) {
+                                        Spacer(Modifier.width(6.dp))
+                                        val dsdLabel = when {
+                                            dsdNativeRate >= 11_289_600 -> "DSD512"
+                                            dsdNativeRate >= 5_644_800  -> "DSD256"
+                                            dsdNativeRate >= 2_822_400  -> "DSD128"
+                                            else                         -> "DSD64"
+                                        }
+                                        Surface(
+                                            shape = RoundedCornerShape(4.dp),
+                                            color = Color(0xFFFFD700).copy(alpha = 0.18f),
+                                            modifier = Modifier.padding(horizontal = 2.dp)
+                                        ) {
+                                            Text(
+                                                text = dsdLabel,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFFB8860B),
+                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                            )
+                                        }
+                                    }
                                 }
 
                                 // Headset / audio device info bar
@@ -1502,7 +1528,9 @@ class MainActivity : ComponentActivity() {
                 val mimeCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
                 while (cursor.moveToNext()) {
                     val mime = cursor.getString(mimeCol) ?: continue
-                    if (mime.startsWith("audio/")) {
+                    val name  = cursor.getString(nameCol) ?: ""
+                    val isDsd = name.endsWith(".dsf", ignoreCase = true) || name.endsWith(".dff", ignoreCase = true)
+                    if (mime.startsWith("audio/") || isDsd) {
                         val docId = cursor.getString(idCol)
                         val name  = cursor.getString(nameCol) ?: docId
                         val uri   = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
@@ -1529,7 +1557,7 @@ class MainActivity : ComponentActivity() {
                 MediaStore.Audio.Media.MIME_TYPE,
                 folderCol
             )
-            val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0"
+            val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0 OR ${MediaStore.Audio.Media.DISPLAY_NAME} LIKE '%.dsf' OR ${MediaStore.Audio.Media.DISPLAY_NAME} LIKE '%.dff'"
             val sortOrder = "${MediaStore.Audio.Media.DISPLAY_NAME} ASC"
 
             contentResolver.query(
