@@ -1,6 +1,7 @@
 #include <jni.h>
 #include <string>
 #include <memory>
+#include <mutex>
 #include <unistd.h>
 #include "../core/AudioPlayer.h"
 #include "../decoders/FlacDecoder.h"
@@ -9,15 +10,22 @@
 #include "../decoders/ReplayGainScanner.h"
 #include "../decoders/DsdDecoder.h"
 
+// g_playerMutex guards g_player access from multiple threads:
+// - loadFileFd / loadNextFileFd run on Dispatchers.IO (Kotlin coroutine)
+// - shutdownEngine runs on Main thread (onDestroy)
+// - All other JNI calls run on Main thread, but the mutex is cheap when uncontested.
 static std::unique_ptr<audio_engine::core::AudioPlayer> g_player;
+static std::mutex g_playerMutex;
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_aiproject_musicplayer_AudioEngine_initEngine(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lk(g_playerMutex);
     g_player = std::make_unique<audio_engine::core::AudioPlayer>();
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_aiproject_musicplayer_AudioEngine_shutdownEngine(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lk(g_playerMutex);
     g_player.reset();
 }
 
@@ -26,7 +34,8 @@ Java_com_aiproject_musicplayer_AudioEngine_shutdownEngine(JNIEnv*, jobject) {
 // ---------------------------------------------------------------------------
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_aiproject_musicplayer_AudioEngine_loadFileFd(JNIEnv*, jobject, jint fd) {
-    if (!g_player) return JNI_FALSE;
+    std::lock_guard<std::mutex> lk(g_playerMutex);
+    if (!g_player) { close(fd); return JNI_FALSE; }
 
     // Scan ReplayGain tag before format detection (both use lseek+read internally)
     float rgDb = audio_engine::decoders::scanReplayGainDb(fd);
@@ -142,6 +151,7 @@ Java_com_aiproject_musicplayer_AudioEngine_getBitsPerSample(JNIEnv*, jobject) {
 // ---------------------------------------------------------------------------
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_aiproject_musicplayer_AudioEngine_loadNextFileFd(JNIEnv*, jobject, jint fd) {
+    std::lock_guard<std::mutex> lk(g_playerMutex);
     if (!g_player) { close(fd); return JNI_FALSE; }
     float rgDb = audio_engine::decoders::scanReplayGainDb(fd);
     std::unique_ptr<audio_engine::decoders::IAudioDecoder> decoder;

@@ -96,12 +96,20 @@ class PlaybackService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        // Cancel all in-flight coroutines FIRST so none can call
+        // updatePlaybackState() after the session is released.
+        fadeJob?.cancel()
+        duckJob?.cancel()
         completionJob?.cancel()
+        gaplessJob?.cancel()
+        loadJob?.cancel()
         serviceScope.cancel()
-        audioEngine.shutdownEngine()
-        mediaSession.isActive = false
-        mediaSession.release()
+        // Deactivate session before release to guard against any
+        // late updatePlaybackState() call from a still-running IO thread.
+        try { mediaSession.isActive = false } catch (_: Exception) {}
+        try { mediaSession.release()       } catch (_: Exception) {}
         abandonAudioFocus()
+        audioEngine.shutdownEngine()
     }
 
     /** Stop playback and service when user swipes app away from recents. */
@@ -482,24 +490,29 @@ class PlaybackService : Service() {
     // ── PlaybackState (drives notification progress bar) ─────────────────────
 
     private fun updatePlaybackState(state: Int) {
+        // Guard: session may already be released if onDestroy() raced with a
+        // coroutine that resumed on the IO thread after serviceScope was cancelled.
+        if (!mediaSession.isActive) return
         val posMs  = try { audioEngine.getPositionMs().toLong() } catch (_: Exception) { 0L }
         val speed  = if (state == PlaybackStateCompat.STATE_PLAYING) 1.0f else 0.0f
-        mediaSession.setPlaybackState(
-            PlaybackStateCompat.Builder()
-                .setActions(
-                    PlaybackStateCompat.ACTION_PLAY or
-                    PlaybackStateCompat.ACTION_PAUSE or
-                    PlaybackStateCompat.ACTION_PLAY_PAUSE or
-                    PlaybackStateCompat.ACTION_STOP or
-                    PlaybackStateCompat.ACTION_SEEK_TO or
-                    PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
-                    PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
-                )
-                // Passing updateTime lets Android auto-advance the seekbar without
-                // polling — it interpolates position using (now - updateTime) * speed.
-                .setState(state, posMs, speed, SystemClock.elapsedRealtime())
-                .build()
-        )
+        try {
+            mediaSession.setPlaybackState(
+                PlaybackStateCompat.Builder()
+                    .setActions(
+                        PlaybackStateCompat.ACTION_PLAY or
+                        PlaybackStateCompat.ACTION_PAUSE or
+                        PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                        PlaybackStateCompat.ACTION_STOP or
+                        PlaybackStateCompat.ACTION_SEEK_TO or
+                        PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                        PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+                    )
+                    .setState(state, posMs, speed, SystemClock.elapsedRealtime())
+                    .build()
+            )
+        } catch (_: IllegalStateException) {
+            // Session was released concurrently — safe to ignore.
+        }
     }
 
     // ── Notification ──────────────────────────────────────────────────────────

@@ -133,25 +133,36 @@ public:
         m_streamRunning = false;
         if (error == oboe::Result::ErrorDisconnected) {
             // Audio device changed (screen recording, headphone unplug, BT switch).
-            // Restart the stream on a background thread — must NOT call Oboe
-            // synchronously from the error callback.
-            // Capture a shared_ptr to the alive-flag so the thread never
-            // dereferences 'this' after the OboeAudioEndpoint is destroyed.
+            // On Xiaomi MIUI, BT disconnects can fire multiple times in quick
+            // succession — m_reinitInProgress prevents stacking reconnect threads.
+            bool expected = false;
+            if (!m_reinitInProgress.compare_exchange_strong(
+                    expected, true, std::memory_order_acq_rel)) {
+                LOGI("Oboe reconnect already in progress, skipping duplicate");
+                return;
+            }
             const int32_t sr    = stream->getSampleRate();
             const int32_t ch    = stream->getChannelCount();
-            auto aliveFlag      = m_alive;          // shared ownership
+            auto aliveFlag      = m_alive;
             OboeAudioEndpoint* self = this;
             std::thread([self, aliveFlag, sr, ch]() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(150));
-                if (!aliveFlag->load(std::memory_order_acquire)) return; // object gone
+                if (!aliveFlag->load(std::memory_order_acquire)) {
+                    self->m_reinitInProgress.store(false, std::memory_order_release);
+                    return;
+                }
                 self->terminateInternal();
-                if (!aliveFlag->load(std::memory_order_acquire)) return;
+                if (!aliveFlag->load(std::memory_order_acquire)) {
+                    self->m_reinitInProgress.store(false, std::memory_order_release);
+                    return;
+                }
                 if (!self->initialize(static_cast<uint32_t>(sr),
                                       static_cast<size_t>(ch))) {
                     if (aliveFlag->load(std::memory_order_acquire))
-                        self->initialize(48000, 2); // fallback
+                        self->initialize(48000, 2); // fallback to safe defaults
                 }
                 LOGI("Oboe stream auto-reconnected after device change");
+                self->m_reinitInProgress.store(false, std::memory_order_release);
             }).detach();
         }
     }
@@ -175,6 +186,9 @@ private:
     // Shared lifetime flag — detached reconnect threads check this before
     // dereferencing 'this', preventing use-after-free on fast shutdown.
     std::shared_ptr<std::atomic<bool>> m_alive;
+    // Prevents multiple concurrent reconnect threads on rapid disconnect events
+    // (common on Xiaomi MIUI when Bluetooth disconnects fire in bursts).
+    std::atomic<bool> m_reinitInProgress{false};
 };
 
 } // namespace hw

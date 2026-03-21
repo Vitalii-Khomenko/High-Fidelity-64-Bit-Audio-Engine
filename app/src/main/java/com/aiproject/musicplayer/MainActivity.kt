@@ -104,7 +104,11 @@ fun detectHeadsetInfo(audioManager: AudioManager): HeadsetInfo? {
         AudioDeviceInfo.TYPE_WIRED_HEADSET,
         AudioDeviceInfo.TYPE_WIRED_HEADPHONES
     )
-    val outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+    // On some Xiaomi/MIUI devices getDevices() throws SecurityException
+    // if Bluetooth permission was denied — return null gracefully.
+    val outputs = try {
+        audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+    } catch (_: Exception) { return null }
     val device = typePriority.firstNotNullOfOrNull { t ->
         if (t < 0) null else outputs.find { it.type == t }
     } ?: return null
