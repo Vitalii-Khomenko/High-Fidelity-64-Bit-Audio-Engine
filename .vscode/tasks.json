@@ -1,0 +1,78 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "android: adb devices",
+            "type": "shell",
+            "command": "${env:LOCALAPPDATA}\\Android\\Sdk\\platform-tools\\adb.exe",
+            "args": [
+                "devices",
+                "-l"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "android: assembleDebug",
+            "type": "shell",
+            "command": "${workspaceFolder}\\gradlew.bat",
+            "args": [
+                "assembleDebug",
+                "--console=plain"
+            ],
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "android: installDebug",
+            "type": "shell",
+            "command": "${workspaceFolder}\\gradlew.bat",
+            "args": [
+                "installDebug",
+                "--console=plain"
+            ],
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "android: launch app",
+            "type": "shell",
+            "command": "${env:LOCALAPPDATA}\\Android\\Sdk\\platform-tools\\adb.exe",
+            "args": [
+                "shell",
+                "am",
+                "start",
+                "-n",
+                "com.aiproject.musicplayer/.MainActivity"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "android: prepare debugger attach",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}\\.vscode\\android-debug.ps1"
+            ],
+            "dependsOn": [
+                "android: installDebug"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "android: logcat app",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "& \"${env:LOCALAPPDATA}\\Android\\Sdk\\platform-tools\\adb.exe\" logcat --pid=$(& \"${env:LOCALAPPDATA}\\Android\\Sdk\\platform-tools\\adb.exe\" shell pidof -s com.aiproject.musicplayer)"
+            ],
+            "isBackground": true,
+            "problemMatcher": []
+        }
+    ]
+}

@@ -1,0 +1,16 @@
+{
+    "C_Cpp.default.compilerPath": "${env:LOCALAPPDATA}/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/windows-x86_64/bin/clang++.exe",
+    "cmake.configureOnOpen": false,
+    "cmake.generator": "Ninja",
+    "java.configuration.runtimes": [
+        {
+            "name": "JavaSE-21",
+            "path": "C:/Program Files/Android/Android Studio/jbr",
+            "default": true
+        }
+    ],
+    "java.configuration.updateBuildConfiguration": "interactive",
+    "java.import.gradle.java.home": "C:/Program Files/Android/Android Studio/jbr",
+    "java.import.gradle.jvmArguments": "-Xmx4096m -XX:MaxMetaspaceSize=512m",
+    "java.jdt.ls.java.home": "C:/Program Files/Android/Android Studio/jbr"
+}

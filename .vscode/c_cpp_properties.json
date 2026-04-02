@@ -1,0 +1,32 @@
+{
+    "configurations": [
+        {
+            "name": "Android-arm64",
+            "compilerPath": "${env:LOCALAPPDATA}/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/windows-x86_64/bin/clang++.exe",
+            "compilerArgs": [
+                "--target=aarch64-none-linux-android24",
+                "--sysroot=${env:LOCALAPPDATA}/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
+            ],
+            "intelliSenseMode": "windows-clang-x64",
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "defines": [
+                "ANDROID"
+            ],
+            "includePath": [
+                "${workspaceFolder}/src/**",
+                "${env:LOCALAPPDATA}/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/**",
+                "${env:LOCALAPPDATA}/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/aarch64-linux-android/**",
+                "${workspaceFolder}/app/.cxx/**/prefab/**/modules/oboe/include/**"
+            ],
+            "browse": {
+                "path": [
+                    "${workspaceFolder}/src",
+                    "${workspaceFolder}/app/.cxx"
+                ],
+                "limitSymbolsToIncludedHeaders": true
+            }
+        }
+    ],
+    "version": 4
+}

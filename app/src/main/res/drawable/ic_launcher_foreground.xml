@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Equalizer bars icon — 5 symmetric bars, bottom-aligned, white fill.
+    Canvas: 108×108 (adaptive icon safe zone is 72×72 centred).
+    Bar widths = 8dp, gap = 5dp, total span = 5*8 + 4*5 = 60dp, centred at x=54.
+    Left edge of bar 1: 54 - 30 = 24.
+    Bar x-positions (left edges): 24, 37, 50, 63, 76
+    Heights (dp): 22, 38, 54, 38, 22  — bottom at y=86.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="
+            M 27,64 L 29,64 Q 32,64 32,67 L 32,83 Q 32,86 29,86 L 27,86 Q 24,86 24,83 L 24,67 Q 24,64 27,64 Z
+            M 40,48 L 42,48 Q 45,48 45,51 L 45,83 Q 45,86 42,86 L 40,86 Q 37,86 37,83 L 37,51 Q 37,48 40,48 Z
+            M 53,32 L 55,32 Q 58,32 58,35 L 58,83 Q 58,86 55,86 L 53,86 Q 50,86 50,83 L 50,35 Q 50,32 53,32 Z
+            M 66,48 L 68,48 Q 71,48 71,51 L 71,83 Q 71,86 68,86 L 66,86 Q 63,86 63,83 L 63,51 Q 63,48 66,48 Z
+            M 79,64 L 81,64 Q 84,64 84,67 L 84,83 Q 84,86 81,86 L 79,86 Q 76,86 76,83 L 76,67 Q 76,64 79,64 Z" />
+</vector>

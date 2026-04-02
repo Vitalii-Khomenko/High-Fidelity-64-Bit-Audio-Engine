@@ -1,0 +1,13 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Android USB Attach (Java)",
+            "type": "java",
+            "request": "attach",
+            "hostName": "127.0.0.1",
+            "port": 8700,
+            "preLaunchTask": "android: prepare debugger attach"
+        }
+    ]
+}
