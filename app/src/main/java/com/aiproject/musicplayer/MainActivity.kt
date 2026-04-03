@@ -1860,12 +1860,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun folderNameFromTreeUri(treeUri: Uri): String {
-        return try {
-            val docId = DocumentsContract.getTreeDocumentId(treeUri) // e.g. "primary:Music/Audiobooks"
-            val decoded = Uri.decode(docId) // decode %3A etc
-            // Take the last path component after the last /
-            decoded.substringAfterLast('/').substringAfterLast(':').ifEmpty { decoded }
-        } catch (_: Exception) { "" }
+        return SafTreeScanner.folderNameFromTreeUri(treeUri)
     }
 
     private fun canReadTrackUri(uri: Uri): Boolean {
@@ -1895,44 +1890,7 @@ class MainActivity : ComponentActivity() {
         folderLabel: String = folderNameFromTreeUri(treeUri),
         depth: Int = 0
     ): List<AudioTrack> {
-        if (depth > 10) return emptyList()
-        val result = mutableListOf<AudioTrack>()
-        try {
-            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId)
-            contentResolver.query(
-                childrenUri,
-                arrayOf(
-                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                    DocumentsContract.Document.COLUMN_MIME_TYPE
-                ), null, null, null
-            )?.use { cursor ->
-                val idCol   = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-                val nameCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-                val mimeCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
-                while (cursor.moveToNext()) {
-                    val childId = cursor.getString(idCol) ?: continue
-                    val name    = cursor.getString(nameCol) ?: ""
-                    val mime    = cursor.getString(mimeCol) ?: ""
-                    when {
-                        // Subdirectory — recurse, using this directory's name as the folder label
-                        mime == DocumentsContract.Document.MIME_TYPE_DIR -> {
-                            result += loadTracksFromTree(treeUri, childId, name, depth + 1)
-                        }
-                        // Audio file (by MIME or extension for DSD)
-                        mime.startsWith("audio/") ||
-                        name.endsWith(".dsf", ignoreCase = true) ||
-                        name.endsWith(".dff", ignoreCase = true) -> {
-                            val fileUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, childId)
-                            result.add(AudioTrack(fileUri, name, folderLabel, 0L))
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        return result
+        return SafTreeScanner.loadTracksFromTree(contentResolver, treeUri, docId, folderLabel, depth)
     }
 
     private fun listLibraryFolderChildren(
@@ -1940,58 +1898,7 @@ class MainActivity : ComponentActivity() {
         docId: String,
         folderLabel: String,
     ): List<LibraryBrowserEntry> {
-        val result = mutableListOf<LibraryBrowserEntry>()
-        try {
-            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId)
-            contentResolver.query(
-                childrenUri,
-                arrayOf(
-                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                    DocumentsContract.Document.COLUMN_MIME_TYPE
-                ), null, null, null
-            )?.use { cursor ->
-                val idCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-                val nameCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-                val mimeCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
-                while (cursor.moveToNext()) {
-                    val childId = cursor.getString(idCol) ?: continue
-                    val name = cursor.getString(nameCol) ?: ""
-                    val mime = cursor.getString(mimeCol) ?: ""
-                    when {
-                        mime == DocumentsContract.Document.MIME_TYPE_DIR -> {
-                            result.add(
-                                LibraryBrowserEntry(
-                                    documentId = childId,
-                                    name = name,
-                                    isDirectory = true,
-                                )
-                            )
-                        }
-                        mime.startsWith("audio/") ||
-                            name.endsWith(".dsf", ignoreCase = true) ||
-                            name.endsWith(".dff", ignoreCase = true) -> {
-                            val fileUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, childId)
-                            result.add(
-                                LibraryBrowserEntry(
-                                    documentId = childId,
-                                    name = name,
-                                    isDirectory = false,
-                                    track = AudioTrack(fileUri, name, folderLabel, 0L)
-                                )
-                            )
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-            throw e
-        }
-        return result.sortedWith(
-            compareBy<LibraryBrowserEntry> { !it.isDirectory }
-                .thenBy { it.name.lowercase() }
-        )
+        return SafTreeScanner.listLibraryFolderChildren(contentResolver, treeUri, docId, folderLabel)
     }
 
     private fun scanMediaStore(): List<AudioTrack> {
