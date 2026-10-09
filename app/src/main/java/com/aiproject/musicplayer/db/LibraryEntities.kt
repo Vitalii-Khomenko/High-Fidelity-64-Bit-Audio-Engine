@@ -142,3 +142,35 @@ interface LibraryDao {
     )
     suspend fun artistAlbums(artistKey: String): List<AlbumRow>
 }
+
+/** EBU R128 measurement of a file without ReplayGain tags (or a CUE track). */
+@Entity(tableName = "loudness")
+data class LoudnessEntity(
+    @PrimaryKey val uri: String,
+    /** Integrated loudness; NaN is stored as null for silence. */
+    val lufs: Double?,
+    val truePeakDb: Double?,
+    val seconds: Double,
+    val analyzedAt: Long,
+)
+
+@Dao
+interface LoudnessDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun put(entry: LoudnessEntity)
+
+    @Query("SELECT * FROM loudness WHERE uri = :uri")
+    suspend fun get(uri: String): LoudnessEntity?
+
+    @Query("SELECT * FROM loudness WHERE uri IN (:uris)")
+    suspend fun getAll(uris: List<String>): List<LoudnessEntity>
+
+    @Query("SELECT COUNT(*) FROM loudness")
+    fun count(): Flow<Int>
+
+    @Query("SELECT l.uri FROM library_tracks l WHERE NOT EXISTS (SELECT 1 FROM loudness d WHERE d.uri = l.uri) ORDER BY l.albumKey, l.discNumber, l.trackNumber")
+    suspend fun libraryWithout(): List<String>
+
+    @Query("SELECT uri FROM library_tracks WHERE albumKey = (SELECT albumKey FROM library_tracks WHERE uri = :uri)")
+    suspend fun albumMates(uri: String): List<String>
+}

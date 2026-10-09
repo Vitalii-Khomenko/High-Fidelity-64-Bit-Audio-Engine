@@ -15,6 +15,13 @@ interface PlayerCommands {
     fun setSpeedMode(mode: SpeedMode)
     fun setEq(eq: EqSettings)
     fun setReplayGain(mode: ReplayGainMode)
+    fun setCrossfeed(mode: CrossfeedMode)
+    fun setLimiter(enabled: Boolean)
+    fun setAutoAnalyze(enabled: Boolean)
+
+    /** Measures every library track without ReplayGain tags (EBU R128), in the background. */
+    fun analyzeLibrary()
+    fun cancelAnalysis()
     fun setContentMode(mode: ContentMode)
     fun startSleepTimer(durationMs: Long)
     fun cancelSleepTimer()

@@ -150,4 +150,27 @@
         <item quantity="many">%d альбомов</item>
         <item quantity="other">%d альбома</item>
     </plurals>
+    <!-- Звук: параметрический EQ, кроссфид, громкость -->
+    <string name="eq_graphic">5 полос</string>
+    <string name="eq_parametric">Параметрический</string>
+    <string name="eq_no_profile">Профиль не загружен. Найдите свои наушники в AutoEQ или импортируйте ParametricEQ.txt (формат AutoEQ / Equalizer APO).</string>
+    <string name="eq_autoeq">AutoEQ</string>
+    <string name="eq_import">Из файла</string>
+    <string name="eq_import_failed">В файле нет параметрических фильтров</string>
+    <string name="eq_parametric_hint">До 20 фильтров в 64 бит. Запас считается по реальному пику профиля, поэтому клиппинга нет.</string>
+    <string name="eq_autoeq_title">Профили наушников AutoEQ</string>
+    <string name="eq_autoeq_hint">Модель, например HD 600</string>
+    <string name="eq_autoeq_offline">Не удалось загрузить каталог AutoEQ (нет сети?)</string>
+    <string name="crossfeed">Кроссфид</string>
+    <string name="crossfeed_default">bs2b</string>
+    <string name="crossfeed_cmoy">Chu Moy</string>
+    <string name="crossfeed_meier">Meier</string>
+    <string name="crossfeed_hint">Для наушников: каждое ухо слышит немного баса из другого канала, как от колонок в комнате. Моно не меняется.</string>
+    <string name="loudness">Громкость</string>
+    <string name="analyze_untagged">Измерять файлы без ReplayGain</string>
+    <string name="analyze_hint">Текущий и следующий трек измеряются (EBU R128) в фоне и затем звучат с той же громкостью, что и файлы с тегами.</string>
+    <string name="analyze_library">Измерить медиатеку</string>
+    <string name="analyzing">Измерено %1$d / %2$d</string>
+    <string name="limiter">Лимитер истинного пика</string>
+    <string name="limiter_hint">Держит межсэмпловые пики ниже −1 dBTP после усиления и EQ. Ниже этого уровня сигнал проходит без изменений до бита.</string>
 </resources>

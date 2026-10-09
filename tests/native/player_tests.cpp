@@ -453,6 +453,43 @@ void testLimiterAndEq() {
     CHECK(peak > 0.8f);
 }
 
+// Switching the limiter on and off while playing hands out what it holds:
+// every frame arrives exactly once. Crossfeed on mono content keeps the level.
+void testOutputDspToggles() {
+    core::AudioPlayer p;
+    CHECK(p.load(std::make_unique<ToneDecoder>(48000), 1.0));
+    p.setNext(std::make_unique<ToneDecoder>(24000, 48000, 2, 0.125), 1.0);
+    startCapture();
+    CHECK(p.play());
+    CHECK(waitFor([&] { return p.positionMs() > 150.0; }));
+    p.setLimiter(false);
+    CHECK(waitFor([&] { return p.positionMs() > 350.0; }));
+    p.setLimiter(true);
+    CHECK(waitFor([&] { return p.positionMs() > 600.0; }));
+    p.setLimiter(false);
+    CHECK(waitFor([&] { return p.consumeTrackAdvanced(); }));
+    p.setLimiter(true);
+    CHECK(waitFor([&] { return p.state() == PlayerState::Ended; }));
+    oboe::capture = false;
+    const auto out = takeCapture();
+    const size_t full = countLevel(out, 0.25f), half = countLevel(out, 0.125f);
+    CHECK(full > 48000 - 1200 && full <= 48000);
+    CHECK(half > 24000 - 64 && half <= 24000 + 1);   // +1: a fade-in sample passes 0.125
+    CHECK_NEAR(p.positionMs(), 500.0, 0.5);
+
+    // Crossfeed: identical channels (mono) pass at unity once the filters settle.
+    core::AudioPlayer c;
+    c.setCrossfeed(1);
+    CHECK(c.load(std::make_unique<ToneDecoder>(24000), 1.0));
+    startCapture();
+    CHECK(c.play());
+    CHECK(waitFor([&] { return c.state() == PlayerState::Ended; }));
+    oboe::capture = false;
+    const auto mono = takeCapture();
+    CHECK(mono.size() >= 2 * 20000);
+    CHECK(std::fabs(mono[2 * 20000] - 0.25f) < 2e-3f);
+}
+
 void testSpeed() {
     core::AudioPlayer p;
     CHECK(p.load(std::make_unique<ToneDecoder>(48000, 48000, 2, 0.25, 440.0), 1.0));
@@ -567,6 +604,7 @@ int main() {
     testReconnect();
     testFailedRestartIsReported();
     testLimiterAndEq();
+    testOutputDspToggles();
     testSpeed();
     testSpectrum();
     testConcurrentControl();

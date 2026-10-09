@@ -51,6 +51,19 @@ FLAC with and without ReplayGain tags, MP3 CBR / VBR / VBR without Xing, a
   unsynchronisation, ID3v1 fallback, APEv2 with a binary cover, MP4 `ilst`
   with freeform ReplayGain, WAV `LIST/INFO`, untagged files.
 
+`dsp_tests.cpp`
+
+- Parametric EQ: response peak of stacked bands, cuts need no headroom,
+  high-pass attenuation.
+- Crossfeed: mono at unity, bass fed across at the preset level (−4.5 dB),
+  treble kept on its side, *Off* bit-exact.
+- True peak of an fs/4 sine sampled at ±0.707 (≈ 0 dBTP).
+- Limiter in random block sizes: bit-exact below the ceiling, no output true
+  peak above −1 dBTP at +6 dB input, nothing added or lost.
+- Loudness: EBU Tech 3341 sine at −23 dBFS = −23.0 LUFS at 44.1 / 48 / 96 kHz,
+  absolute and relative gating, silence; a whole WAV file and a CUE range
+  through the decoder path.
+
 `player_tests.cpp` runs `AudioPlayer` against a simulated Oboe stream
 (`stubs/oboe/Oboe.h`): playing to the end with drain, pause/resume without a
 decoder seek and without losing samples, immediate volume, seeks while playing
@@ -60,7 +73,8 @@ seek and clear-next during the gapless look-ahead window (also with a next
 track shorter than the look-ahead), clearing a format-change transition while
 draining, a pause during a decoder read, format queries during a slow stream
 open, NaN/Inf float WAV input, `play()` racing a gapless switch (TSan), a
-reconnect whose restart keeps failing, limiter ceiling with EQ boost, time-stretch timing, spectrum, concurrent control
+reconnect whose restart keeps failing, limiter ceiling with EQ boost, switching the limiter and crossfeed while
+playing and across a gapless boundary (every frame exactly once), time-stretch timing, spectrum, concurrent control
 from several threads and destruction while playing.
 
 The stubs exist only on the test include path; Android builds use real Oboe.
@@ -74,7 +88,8 @@ The stubs exist only on the test include path; Android builds use real Oboe.
 Queue and shuffle logic (`PlaybackQueueTest`), audio focus policy, supported
 formats and sorting (including album order), CUE sheets (timing, pregaps,
 one file per track, code pages) and range URIs, the native tag record, library
-grouping keys and search patterns, media ids (incl. albums / artists), DLNA protocol (paging, containers, XML hardening), EQ
+grouping keys and search patterns, AutoEQ / Equalizer APO parsing, the AutoEQ index and
+profile URLs, EQ profile storage, R128 → ReplayGain maths, media ids (incl. albums / artists), DLNA protocol (paging, containers, XML hardening), EQ
 settings, speed clamping, DSD labels, library folder serialisation.
 
 ## Instrumented tests
@@ -127,6 +142,7 @@ Before treating a build as stable, check:
 5. Headphones and Bluetooth: unplug (pauses), reconnect, switching outputs while playing; a call or voice message and return of focus.
 6. Screen off for 30 minutes; sleep timer; leaving and reopening the app; notification and lock-screen controls with the app closed.
 7. SAF folders, saved playlists, Books bookmarks after a restart, DLNA on your server.
+9. Sound: an AutoEQ profile for your headphones (search, apply, switch back to 5 bands), crossfeed presets with headphones, *Measure library* on a few albums without tags and their level against tagged ones, the limiter with EQ boosts.
 8. Library: first indexing of a large folder (progress, time), albums and artists, search in Cyrillic, covers (embedded and `cover.jpg`), adding a file and *Update library*; lock-screen and notification cover; albums with covers in Android Auto.
 
 Useful reports include the phone model, Android version, file format and rate,

@@ -9,6 +9,9 @@
 | [Monkey's Audio SDK 13.27](https://www.monkeysaudio.com) (Matthew T. Ashland) | APE decoding (`src/third_party/monkeys-audio`) | BSD 3-clause — `src/third_party/monkeys-audio/License.txt` |
 | [libtta++ 2.3](https://sourceforge.net/projects/tta/) (Aleksander Djuric) | TTA decoding, built as the separate shared library `libtta.so` (`src/third_party/libtta`) | **GNU LGPL 3** — `src/third_party/libtta/COPYING`; changes listed in `src/third_party/libtta/CHANGES` |
 | [Oboe](https://github.com/google/oboe) | Audio output | Apache License 2.0 |
+| [bs2b](https://bs2b.sourceforge.net) (Boris Mikhaylov) | The crossfeed algorithm and presets, re-implemented in `src/dsp/Crossfeed.h` | MIT |
+| [libebur128](https://github.com/jiixyj/libebur128) (Jan Kokemüller) | K-weighting filter design for any sample rate, re-implemented in `src/dsp/LoudnessMeter.h` | MIT |
+| [AutoEQ](https://github.com/jaakkopasanen/AutoEq) (Jaakko Pasanen) | Headphone profiles, downloaded on request from GitHub (not bundled) | MIT |
 | AndroidX, Jetpack Compose, Room, Kotlin coroutines | App | Apache License 2.0 |
 | [Sora](https://github.com/sora-xor/sora-font) | Display font (`res/font/sora_*.ttf`, static instances) | SIL Open Font License 1.1 — [docs/licenses/Sora-OFL.txt](docs/licenses/Sora-OFL.txt) |
 | [Source Sans 3](https://github.com/adobe-fonts/source-sans) | Body font (`res/font/source_sans_*.ttf`, Latin + Cyrillic subset) | SIL Open Font License 1.1 — [docs/licenses/SourceSans3-OFL.txt](docs/licenses/SourceSans3-OFL.txt) |

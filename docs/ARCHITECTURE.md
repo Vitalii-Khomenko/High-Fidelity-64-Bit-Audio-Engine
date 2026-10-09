@@ -115,6 +115,14 @@ picture in the folder), scaled to 600 px, cached once per picture under
 per size. `CoverProvider` serves them to Android Auto; it only answers for
 library tracks and the track being played.
 
+`LoudnessAnalyzer` measures files without ReplayGain tags (EBU R128, native)
+on a single low-priority thread: the current and the next track while
+playing, or the whole library on request. Results live in the `loudness`
+table; a file found to carry tags is marked so it is never decoded for this.
+Before a load or pre-load the service looks up the measured track and album
+values and passes them to the engine, which uses them only when the file has
+no tags.
+
 `TrackProbe` completes queued tracks that lack tags or a length (from the
 index, else from the file) in the background; in *Books* mode titles keep the
 file names.
@@ -123,10 +131,10 @@ file names.
 
 | Where | What |
 |---|---|
-| `player_state` preferences | queue (JSON), index, shuffle order, resume point, settings, per-file bookmarks (`pos_uri_<uri>`), saved SAF folders |
+| `player_state` preferences | queue (JSON), index, shuffle order, resume point, settings (incl. EQ mode and profile, crossfeed, limiter, auto-measure), per-file bookmarks (`pos_uri_<uri>`), saved SAF folders |
 | `audiobook_progress` preferences | finished files (Books mode) |
 | `ui` preferences | theme, whether permissions were requested |
-| Room `musicplayer_database` | saved playlists and their tracks, the library index (schema 6; migrations 3→4, 4→5 album fields, 5→6 library) |
+| Room `musicplayer_database` | saved playlists and their tracks, the library index, loudness measurements (schema 7; migrations 3→4, 4→5 album fields, 5→6 library, 6→7 loudness) |
 | `cacheDir/covers` | scaled cover pictures (can be cleared by the system) |
 
 Keys are compatible with 0.8.x installs, so an update keeps the queue, folders,

@@ -9,18 +9,23 @@ src/
   core/AudioBuffer.h        planar double buffer
   core/RingBuffer.h         lock-free SPSC ring with a safe flush
   hw/OboeOutput.h           ring -> volume/fade/limiter -> Oboe float stream
-  decoders/                 FLAC, WAV/AIFF, MP3, DSD, ReplayGain tag reader
-  dsp/                      EQ (biquads), time-stretch, FIR design, downmix, spectrum
+  decoders/                 all decoders, container sniffing, duration probe, loudness scan
+  tags/                     tag reader (Vorbis comments, ID3, APEv2, MP4, covers)
+  dsp/                      parametric EQ, crossfeed, true-peak limiter, loudness meter,
+                            time-stretch, FIR design, downmix, spectrum
   third_party/sonic/        Sonic time-stretcher, converted to float processing
 ```
 
 ## Signal path
 
 ```
- file ─► decoder ─► EQ (+auto preamp) ─► ReplayGain ─► [time-stretch] ─► edge ramp ─► downmix ─► ring
-        (double)        (double)            (double)       (float)                    (if needed)   │
-                                                                                                    ▼
-                         device ◄── float ◄── limiter ◄── fade ◄── volume ◄──────── Oboe callback
+ file ─► decoder ─► EQ (+headroom) ─► ReplayGain ─► [time-stretch] ─► edge ramp ─► downmix
+        (double)      (double)          (double)       (float)                    (if needed)
+                                                                                      │
+   ring ◄── true-peak limiter (−1 dBTP, look-ahead) ◄── crossfeed (stereo) ◄─────────┘
+    │
+    ▼  Oboe callback
+   volume ─► fade ─► sample-peak guard ─► float ─► device
 ```
 
 - **Decoders** deliver planar `double`. Integer PCM is scaled by 2⁻³¹ (exact),
@@ -30,8 +35,9 @@ src/
   `nice -16` where permitted.
 - **Oboe callback** (`OboeOutput::onAudioReady`) pulls from the ring without
   locks or allocation and applies, per frame: the transport fade, a linear volume
-  ramp (a full-scale change takes 30 ms), and a peak limiter with a −0.1 dBFS
-  ceiling (instant attack, 150 ms release, inactive below the ceiling).
+  ramp (a full-scale change takes 30 ms), and a sample-peak guard with a
+  −0.1 dBFS ceiling (instant attack, 150 ms release, inactive below the
+  ceiling). With the true-peak limiter on, the guard never acts.
 
 Volume and fades sit after the buffer on purpose: they react within one
 callback, while EQ and ReplayGain belong to the source track and must change
@@ -237,12 +243,57 @@ read only when asked for.
 independently. The applied linear gain is limited to `1 / peak` when a peak is
 known. Album mode falls back to track gain and vice versa.
 
-## Equaliser
+## Equaliser (`dsp/ParametricEq.h`)
 
-Five RBJ biquads in `double`: low shelf 60 Hz, peaks at 230 Hz / 910 Hz / 3.6 kHz
-(Q 0.9), high shelf 14 kHz; ±12 dB. When enabled, the largest boost is
-subtracted as a preamp so boosted bands do not clip. Changes are picked up by
-the decode thread (they are heard after the ~300 ms buffer).
+A cascade of up to 20 RBJ biquads in `double`: peak, low / high shelf, low /
+high pass. The five-band graphic EQ is one set of bands (60 Hz shelf,
+230 / 910 / 3600 Hz peaks with Q 0.9, 14 kHz shelf, ±12 dB); a parametric
+profile (AutoEQ, Equalizer APO) is another. The **headroom** is the cascade's
+real peak gain, measured on 480 log-spaced frequencies plus every band centre,
+or the profile's own preamp if that is lower; so an EQ never raises the level
+above the source and cannot clip. Band changes keep the filter state (no click)
+and are picked up by the decode thread, i.e. heard after the ~300 ms buffer.
+
+## Crossfeed (`dsp/Crossfeed.h`)
+
+The bs2b algorithm (Boris Mikhaylov; re-implemented here in `double`): each
+channel gets the other channel through a first-order low-pass at the feed
+level, while a first-order high-shelf on the direct channel keeps the
+balance; a final gain makes mono content pass at exactly unity. Presets:
+*bs2b* 700 Hz / 4.5 dB, *Chu Moy* 700 Hz / 6 dB, *Jan Meier* 650 Hz / 9.5 dB.
+It runs on the stereo output (after the downmix), so it also applies to
+folded-down multichannel. *Off* is bit-exact.
+
+## True-peak limiter (`dsp/TruePeak.h`, `dsp/TruePeakLimiter.h`)
+
+Inter-sample peaks are estimated per ITU-R BS.1770 Annex 2: 4x polyphase
+interpolation (48-tap Kaiser) and the largest magnitude of a sample and its
+three interpolated neighbours. The limiter needs, per frame, `ceiling / peak`;
+that requirement goes through a sliding minimum over a 1.5 ms look-ahead, a
+50 ms release (the gain may fall at once but only rises slowly), and a moving
+average of the same length. An average of minima that all contain a frame's
+own requirement can never exceed it, so **no true peak passes −1 dBTP**, and
+the gain still ramps into a peak instead of jumping. Below the ceiling the
+gain is exactly 1 and samples pass bit-exact.
+
+The audio is delayed by the look-ahead. After a reset (load, seek) the first
+frames are withheld rather than padded with silence, and at the end of a track
+or when the limiter is switched off the withheld frames are written before the
+output drains, so no audio is added or lost. The player adds this latency when
+it marks a gapless boundary or a speed change, so positions and the
+"track changed" event stay exact.
+
+## Loudness analysis (`dsp/LoudnessMeter.h`, `decoders/LoudnessScan.h`)
+
+Files without ReplayGain tags can be measured: the whole file (or CUE range)
+is decoded as fast as possible through the normal decoders and measured per
+EBU R128 / BS.1770-4 — K-weighting computed for the actual sample rate (as in
+libebur128), 400 ms blocks with 75 % overlap, absolute gate −70 LUFS, relative
+gate −10 LU, channel weights 1.0 / LFE 0 / surrounds 1.41 — together with the
+4x true peak. The app turns the result into ReplayGain values at the
+ReplayGain 2.0 reference of −18 LUFS (gain = −18 − loudness, peak = true peak)
+and passes them with the track; tags, when present, always win. Album gain is
+the duration-weighted energy mean of the album's measured tracks.
 
 ## Time-stretch
 
@@ -268,12 +319,13 @@ heard rather than what was decoded 300 ms earlier.
 |---|---|
 | `load(context, uri, replayGain)` / `loadNext(...)` | Takes ownership of a detached fd; opens the decoder **outside** any global lock (a CUE range is split off the URI and passed as start / end), then calls `load()` / `setNext()` |
 | `play()`, `pause()`, `stop()`, `seekTo(ms)` | Transport |
-| `setVolume`, `setSpeed`, `setSpeedMode`, `setEqEnabled`, `setEqBand` | Controls |
+| `setVolume`, `setSpeed`, `setSpeedMode`, `setEq(settings)`, `setCrossfeed`, `setLimiter` | Controls (`setEq` sends all bands at once: type, frequency, Q, gain) |
 | `state()`, `positionMs()`, `durationMs()`, `format()`, `consumeTrackAdvanced()`, `spectrum()` | Non-blocking queries |
 
 `NativeTags` (no instance; the caller keeps the fd): `readTags(fd)` returns the
 fields as NUL-separated UTF-8 bytes (JNI `NewStringUTF` cannot take 4-byte
-UTF-8), `readPicture(fd)` the cover bytes, `probeDurationMs(fd)` the length
+UTF-8), `readPicture(fd)` the cover bytes, `loudness(fd, start, end)` an EBU R128
+measurement (seconds of CPU), `probeDurationMs(fd)` the length
 without decoding (`decoders/DurationProbe.h`: FLAC STREAMINFO, MP4 `mvhd`,
 Xing / VBRI frame counts or the CBR byte count for MP3, the last Ogg granule
 position, and a headers-only decoder open for the other formats), used to

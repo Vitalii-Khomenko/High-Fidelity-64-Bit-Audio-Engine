@@ -15,7 +15,7 @@
 #include "decoders/WavDecoder.h"
 #include "dsp/ChannelMixer.h"
 #include "dsp/FirDesign.h"
-#include "dsp/GraphicEqProcessor.h"
+#include "dsp/ParametricEq.h"
 #include "dsp/TimeStretchProcessor.h"
 
 using namespace audio_engine;
@@ -417,13 +417,14 @@ void testStretchResolution() {
 void testEqResponse() {
     // A +6 dB peak at 910 Hz must raise a 910 Hz sine by ~6 dB and leave 10 kHz alone.
     for (double freq : {910.0, 10000.0}) {
-        dsp::GraphicEqProcessor eq;
-        eq.prepare(48000, 1024);
-        eq.setEnabled(true);
-        eq.setBandGain(2, 6.0);
+        dsp::ParametricEq eq;
+        eq.prepare(48000);
+        const double gains[5] = {0, 0, 6.0, 0, 0};
+        eq.setBands(dsp::graphicBands(gains));
+        CHECK_NEAR(eq.peakGainDb(), 6.0, 0.05);
         std::vector<double> x(48000);
         for (size_t n = 0; n < x.size(); ++n) x[n] = 0.1 * std::sin(2 * M_PI * freq * n / 48000.0);
-        eq.processRawInterleaved(x.data(), x.size(), 1);
+        eq.processInterleaved(x.data(), x.size(), 1);
         const double amp = fitSine(x, 8000, 48000, freq, 48000.0);
         const double gain = db(amp / 0.1);
         if (freq < 1000) CHECK_NEAR(gain, 6.0, 0.2); else CHECK_NEAR(gain, 0.0, 0.3);

@@ -2,6 +2,8 @@ package com.aiproject.musicplayer
 
 import android.content.Context
 import android.net.Uri
+import com.aiproject.musicplayer.playback.CrossfeedMode
+import com.aiproject.musicplayer.playback.EqSettings
 import com.aiproject.musicplayer.playback.PlayableUri
 import com.aiproject.musicplayer.playback.ReplayGainMode
 
@@ -51,17 +53,17 @@ class AudioEngine {
      * Opens [uri] (content:// or file://, optionally a CUE range, see
      * [PlayableUri]) and makes it current, paused at 0.
      */
-    fun load(context: Context, uri: Uri, replayGain: ReplayGainMode): Boolean {
+    fun load(context: Context, uri: Uri, replayGain: ReplayGainMode, measuredGain: DoubleArray? = null): Boolean {
         val parts = PlayableUri.split(uri.toString())
         val fd = openFd(context, Uri.parse(parts.fileUri)) ?: return false
-        return nativeLoad(id, fd, replayGain.id, parts.startUs, parts.endUs)
+        return nativeLoad(id, fd, replayGain.id, parts.startUs, parts.endUs, measuredGain)
     }
 
     /** Queues [uri] for a gapless transition after the current track. */
-    fun loadNext(context: Context, uri: Uri, replayGain: ReplayGainMode): Boolean {
+    fun loadNext(context: Context, uri: Uri, replayGain: ReplayGainMode, measuredGain: DoubleArray? = null): Boolean {
         val parts = PlayableUri.split(uri.toString())
         val fd = openFd(context, Uri.parse(parts.fileUri)) ?: return false
-        return nativeLoadNext(id, fd, replayGain.id, parts.startUs, parts.endUs)
+        return nativeLoadNext(id, fd, replayGain.id, parts.startUs, parts.endUs, measuredGain)
     }
 
     fun clearNext() = nativeClearNext(id)
@@ -72,8 +74,19 @@ class AudioEngine {
     fun setVolume(volume: Double) = nativeSetVolume(id, volume)
     fun setSpeed(speed: Double) = nativeSetSpeed(id, speed)
     fun setSpeedMode(mode: Int) = nativeSetSpeedMode(id, mode)
-    fun setEqEnabled(enabled: Boolean) = nativeSetEqEnabled(id, enabled)
-    fun setEqBand(band: Int, gainDb: Double) = nativeSetEqBand(id, band, gainDb)
+    fun setEq(eq: EqSettings) {
+        val bands = eq.engineBands()
+        val flat = DoubleArray(bands.size * 4)
+        bands.forEachIndexed { i, b ->
+            flat[i * 4] = b.filter.id.toDouble()
+            flat[i * 4 + 1] = b.frequency
+            flat[i * 4 + 2] = b.q
+            flat[i * 4 + 3] = b.gainDb
+        }
+        nativeSetEq(id, eq.enabled, eq.enginePreampDb(), flat)
+    }
+    fun setCrossfeed(mode: CrossfeedMode) = nativeSetCrossfeed(id, mode.id)
+    fun setLimiter(enabled: Boolean) = nativeSetLimiter(id, enabled)
 
     fun state(): State = State.entries.getOrElse(nativeGetState(id)) { State.ERROR }
     fun positionMs(): Long = nativeGetPositionMs(id).toLong()
@@ -110,8 +123,8 @@ class AudioEngine {
 
     private external fun nativeCreate(): Long
     private external fun nativeRelease(id: Long)
-    private external fun nativeLoad(id: Long, fd: Int, replayGainMode: Int, startUs: Long, endUs: Long): Boolean
-    private external fun nativeLoadNext(id: Long, fd: Int, replayGainMode: Int, startUs: Long, endUs: Long): Boolean
+    private external fun nativeLoad(id: Long, fd: Int, replayGainMode: Int, startUs: Long, endUs: Long, fallbackGain: DoubleArray?): Boolean
+    private external fun nativeLoadNext(id: Long, fd: Int, replayGainMode: Int, startUs: Long, endUs: Long, fallbackGain: DoubleArray?): Boolean
     private external fun nativeClearNext(id: Long)
     private external fun nativePlay(id: Long): Boolean
     private external fun nativePause(id: Long)
@@ -120,8 +133,9 @@ class AudioEngine {
     private external fun nativeSetVolume(id: Long, volume: Double)
     private external fun nativeSetSpeed(id: Long, speed: Double)
     private external fun nativeSetSpeedMode(id: Long, mode: Int)
-    private external fun nativeSetEqEnabled(id: Long, enabled: Boolean)
-    private external fun nativeSetEqBand(id: Long, band: Int, gainDb: Double)
+    private external fun nativeSetEq(id: Long, enabled: Boolean, preampDb: Double, bands: DoubleArray)
+    private external fun nativeSetCrossfeed(id: Long, preset: Int)
+    private external fun nativeSetLimiter(id: Long, enabled: Boolean)
     private external fun nativeGetState(id: Long): Int
     private external fun nativeGetPositionMs(id: Long): Double
     private external fun nativeGetDurationMs(id: Long): Double

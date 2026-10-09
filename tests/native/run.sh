@@ -69,6 +69,7 @@ flags="-std=c++17 -O1 -g -pthread -DHIFI_MEDIACODEC=1 -Itests/native/stubs -Isrc
 cc -O1 -g $san -c src/third_party/sonic/sonic.c -o "$work/sonic.o"
 c++ $flags $san tests/native/decoder_tests.cpp "$work/sonic.o" $tp_libs -o "$work/decoder_tests" -lm
 c++ $flags $san tests/native/format_tests.cpp $tp_libs -o "$work/format_tests" -lm
+c++ $flags $san tests/native/dsp_tests.cpp $tp_libs -o "$work/dsp_tests" -lm
 c++ $flags $san tests/native/player_tests.cpp "$work/sonic.o" $tp_libs -o "$work/player_tests" -lm
 
 if command -v sox >/dev/null && command -v flac >/dev/null && command -v lame >/dev/null; then
@@ -90,6 +91,7 @@ else
     "$work/decoder_tests"
     "$work/format_tests"
 fi
+"$work/dsp_tests"
 "$work/player_tests"
 
 if [[ "${TSAN:-0}" == "1" ]]; then

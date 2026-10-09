@@ -46,6 +46,15 @@ enum class SpeedMode(val id: Int) {
     }
 }
 
+/** Headphone crossfeed presets (bs2b); ids match dsp::Crossfeed::Preset. */
+enum class CrossfeedMode(val id: Int) {
+    OFF(0), DEFAULT(1), CHU_MOY(2), JAN_MEIER(3);
+
+    companion object {
+        fun fromId(id: Int): CrossfeedMode = entries.firstOrNull { it.id == id } ?: OFF
+    }
+}
+
 enum class ReplayGainMode(val id: Int) {
     OFF(0), TRACK(1), ALBUM(2);
 

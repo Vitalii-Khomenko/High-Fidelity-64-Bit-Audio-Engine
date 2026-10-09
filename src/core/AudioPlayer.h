@@ -17,9 +17,11 @@
 #include "AudioBuffer.h"
 #include "../decoders/IAudioDecoder.h"
 #include "../dsp/ChannelMixer.h"
-#include "../dsp/GraphicEqProcessor.h"
+#include "../dsp/Crossfeed.h"
+#include "../dsp/ParametricEq.h"
 #include "../dsp/SpectrumAnalyzer.h"
 #include "../dsp/TimeStretchProcessor.h"
+#include "../dsp/TruePeakLimiter.h"
 #include "../hw/OboeOutput.h"
 
 namespace audio_engine {
@@ -47,8 +49,9 @@ struct TrackInfo {
 /**
  * Playback engine: one decode thread feeding OboeOutput.
  *
- *   decoder -> EQ (+preamp) -> ReplayGain -> [time stretch] -> downmix -> ring
- *   ring -> volume / fades / limiter -> device                (Oboe callback)
+ *   decoder -> EQ (+headroom) -> ReplayGain -> [time stretch] -> downmix
+ *           -> crossfeed -> true-peak limiter -> ring
+ *   ring -> volume / fades / sample-peak guard -> device       (Oboe callback)
  *
  * Public methods may be called from any thread. Mutators are serialised by
  * m_control; getters never wait for decoding or I/O.
@@ -93,6 +96,7 @@ public:
         const bool sameFormat = m_output->isConfigured() &&
             m_output->sampleRate() == info.sampleRate && m_decoderChannels == info.channels;
         m_pendingFrames = 0;
+        m_pending.clear();
         if (sameFormat) {
             m_output->flush();
         } else if (!m_output->configure(info.sampleRate, static_cast<int>(info.channels))) {
@@ -234,19 +238,48 @@ public:
         m_eqDirty.store(true, std::memory_order_release);
     }
 
+    /** One slider of the five-band graphic EQ; switches the EQ to the graphic bands. */
     void setEqBandGain(size_t band, double gainDb) {
-        if (band >= m_eqGains.size() || !std::isfinite(gainDb)) return;
+        if (band >= 5 || !std::isfinite(gainDb)) return;
         std::lock_guard<std::mutex> lock(m_eqMutex);
-        m_eqGains[band] = std::clamp(gainDb, -12.0, 12.0);
+        m_graphic[band] = std::clamp(gainDb, -12.0, 12.0);
+        m_eqBands = dsp::graphicBands(m_graphic.data());
+        m_eqUserPreampDb = 0.0;
+        m_eqDirty.store(true, std::memory_order_release);
+    }
+
+    /**
+     * Any parametric EQ (graphic sliders, AutoEQ profile). The applied preamp
+     * is the lower of [preampDb] and the cascade's own peak gain, so the EQ
+     * never boosts above the source level.
+     */
+    void setEq(bool enabled, double preampDb, std::vector<dsp::EqBand> bands) {
+        std::lock_guard<std::mutex> lock(m_eqMutex);
+        m_eqEnabled = enabled;
+        m_eqUserPreampDb = std::isfinite(preampDb) ? std::clamp(preampDb, -30.0, 0.0) : 0.0;
+        m_eqBands = std::move(bands);
         m_eqDirty.store(true, std::memory_order_release);
     }
 
     void resetEq() {
         std::lock_guard<std::mutex> lock(m_eqMutex);
         m_eqEnabled = false;
-        m_eqGains.fill(0.0);
+        m_graphic.fill(0.0);
+        m_eqBands.clear();
+        m_eqUserPreampDb = 0.0;
         m_eqDirty.store(true, std::memory_order_release);
     }
+
+    /** Headphone crossfeed preset (dsp::Crossfeed::Preset), stereo output only. */
+    void setCrossfeed(int preset) {
+        m_crossfeedPreset.store(std::clamp(preset, 0, 3), std::memory_order_release);
+    }
+
+    /** True-peak limiter at -1 dBTP in the decode path (on by default). */
+    void setLimiter(bool enabled) { m_limiterWanted.store(enabled, std::memory_order_release); }
+
+    /** Lowest gain the true-peak limiter applied since the last call (1 = untouched). */
+    double takeLimiterMinGain() { return m_limiterMinGain.exchange(1.0, std::memory_order_acq_rel); }
 
     // ── Queries (never block on decoding) ────────────────────────────────────
 
@@ -362,7 +395,7 @@ private:
         std::lock_guard<std::mutex> lock(m_infoMutex);
         if (m_segments.empty()) return 0.0;
         const Segment& last = m_segments.back();
-        const uint64_t written = m_output->writtenFrames();
+        const uint64_t written = m_output->writtenFrames() + outputLatency();
         const double delta = written > last.startOut ? static_cast<double>(written - last.startOut) : 0.0;
         return last.startSource + delta * last.rate;
     }
@@ -397,9 +430,13 @@ private:
         m_decoderChannels = channels;
         m_outChannels = static_cast<uint32_t>(m_output->channels());
         m_downmix.configure(channels);
-        m_eq.prepare(sampleRate, kChunkFrames);
+        m_eq.prepare(sampleRate);
         m_eqDirty.store(true, std::memory_order_release);
         applyEq();
+        m_crossfeed.prepare(sampleRate);
+        m_crossfeed.setPreset(static_cast<dsp::Crossfeed::Preset>(m_crossfeedPreset.load(std::memory_order_acquire)));
+        m_limiter.prepare(sampleRate, m_outChannels);
+        m_limiterOn = m_limiterWanted.load(std::memory_order_acquire);
         m_stretch.prepare(sampleRate, channels);
         m_stretch.setMode(m_speedMode.load(std::memory_order_acquire) == 1
             ? dsp::TimeStretchMode::Speech : dsp::TimeStretchMode::Music);
@@ -416,21 +453,43 @@ private:
 
     void applyEq() {
         if (!m_eqDirty.exchange(false, std::memory_order_acq_rel)) return;
-        std::array<double, dsp::GraphicEqProcessor::BandCount> gains{};
+        std::vector<dsp::EqBand> bands;
+        double userPreamp = 0.0;
         bool enabled;
         {
             std::lock_guard<std::mutex> lock(m_eqMutex);
-            gains = m_eqGains;
+            bands = m_eqBands;
+            userPreamp = m_eqUserPreampDb;
             enabled = m_eqEnabled;
         }
-        m_eq.setEnabled(enabled);
-        double maxBoost = 0.0;
-        for (size_t i = 0; i < gains.size(); ++i) {
-            m_eq.setBandGain(i, gains[i]);
-            maxBoost = std::max(maxBoost, gains[i]);
-        }
-        // Automatic preamp keeps boosted bands from clipping.
-        m_eqPreamp = enabled ? std::pow(10.0, -maxBoost / 20.0) : 1.0;
+        if (!enabled) bands.clear();
+        const bool wasEmpty = m_eq.empty();
+        m_eq.setBands(std::move(bands));
+        if (wasEmpty) m_eq.reset();
+        // Headroom: the cascade's own peak gain, or the profile's preamp if lower.
+        m_eqPreamp = enabled ? std::pow(10.0, std::min(userPreamp, -m_eq.peakGainDb()) / 20.0) : 1.0;
+    }
+
+    /** Crossfeed preset and limiter switch changes, picked up by the decode thread. */
+    void applyOutputDsp() {
+        const auto preset = static_cast<dsp::Crossfeed::Preset>(m_crossfeedPreset.load(std::memory_order_acquire));
+        if (preset != m_crossfeed.preset()) m_crossfeed.setPreset(preset);
+        const bool wanted = m_limiterWanted.load(std::memory_order_acquire);
+        if (wanted == m_limiterOn) return;
+        if (!wanted) flushLimiter();   // hand out what it holds before bypassing it
+        m_limiter.reset();
+        m_limiterOn = wanted;
+    }
+
+    /** Frames processed but still inside the limiter's look-ahead. */
+    uint64_t outputLatency() const { return m_limiterOn ? m_limiter.latency() : 0; }
+
+    /** Writes the limiter's withheld frames (end of a track, or switching it off). */
+    void flushLimiter() {
+        if (!m_limiterOn || m_limiter.latency() == 0) return;
+        m_limited.resize(m_limiter.latency() * m_outChannels + 16);
+        const size_t n = m_limiter.flush(m_limited.data());
+        writeOut(m_limited.data(), n);
     }
 
     void clearNextSlot() {
@@ -480,7 +539,10 @@ private:
         m_decoder->seekToFrame(static_cast<uint64_t>(std::max<int64_t>(frame, 0)));
         m_output->flush();
         m_pendingFrames = 0;
+        m_pending.clear();
         m_eq.reset();
+        m_crossfeed.reset();
+        m_limiter.reset();
         m_stretch.reset();
         m_stretch.setSpeed(m_speed.load(std::memory_order_acquire));
         m_inputExhausted = false;
@@ -514,6 +576,7 @@ private:
         setpriority(PRIO_PROCESS, static_cast<id_t>(gettid()), -16);
         while (!stopRequested()) {
             applyEq();
+            applyOutputDsp();
             if (m_prevDecoder && !switchPending()) m_prevDecoder.reset();  // boundary is audible now
             if (m_revertNext.exchange(false, std::memory_order_acq_rel) && switchPending()) {
                 // The next track was cleared before anyone heard it.
@@ -545,7 +608,7 @@ private:
                 continue;
             }
             if (!normal && speed != m_appliedSpeed) {
-                const uint64_t at = m_output->writtenFrames();
+                const uint64_t at = m_output->writtenFrames() + outputLatency();
                 appendSegment(at, writeHeadSourceFrame(), speed, decoderInfo());
                 m_stretch.setSpeed(speed);
                 m_appliedSpeed = speed;
@@ -578,7 +641,8 @@ private:
     size_t decodeNormal() {
         size_t frames = m_decoder->readFrames(m_source, kChunkFrames);
         if (frames == 0) {
-            if (!switchToNextGapless(m_output->writtenFrames())) return 0;
+            // The limiter still holds the last frames: the boundary is after them.
+            if (!switchToNextGapless(m_output->writtenFrames() + outputLatency())) return 0;
             frames = m_decoder->readFrames(m_source, kChunkFrames);
             if (frames == 0) return 0;
         }
@@ -596,7 +660,7 @@ private:
                 if (m_seekRequest.load(std::memory_order_acquire) >= 0) return 0;
                 if (switchPending()) break;  // decide after the earlier boundary is heard
                 // Keep feeding the stretcher across a gapless boundary.
-                const uint64_t boundary = m_output->writtenFrames() + m_stretch.getAvailableFrames();
+                const uint64_t boundary = m_output->writtenFrames() + outputLatency() + m_stretch.getAvailableFrames();
                 if (switchToNextGapless(boundary)) continue;
                 m_inputExhausted = true;
                 m_stretch.markEndOfInput();
@@ -627,14 +691,14 @@ private:
 
     void applyTrackDsp(double* data, size_t frames) {
         const size_t ch = m_decoderChannels;
-        m_eq.processRawInterleaved(data, frames, ch);
+        m_eq.processInterleaved(data, frames, ch);
         const double gain = m_gainLinear * m_eqPreamp;
         if (gain != 1.0) {
             for (size_t i = 0; i < frames * ch; ++i) data[i] *= gain;
         }
     }
 
-    // Edge ramp, downmix, then into the ring.
+    // Edge ramp, downmix, crossfeed, limiter, then into the ring.
     void emit(double* data, size_t frames) {
         const size_t ch = m_decoderChannels;
         if (m_startRampRemaining > 0) {
@@ -647,6 +711,26 @@ private:
             m_startRampRemaining -= ramp;
         }
         if (m_outChannels == 2 && ch > 2) m_downmix.process(data, frames);
+        if (m_outChannels == 2) m_crossfeed.process(data, frames);
+        if (m_limiterOn) {
+            frames = m_limiter.process(data, frames, data);   // fewer only while its look-ahead fills
+            const double g = m_limiter.takeMinGain();
+            if (g < 1.0) {
+                double cur = m_limiterMinGain.load(std::memory_order_relaxed);
+                while (g < cur && !m_limiterMinGain.compare_exchange_weak(cur, g, std::memory_order_acq_rel)) {}
+            }
+        }
+        writeOut(data, frames);
+    }
+
+    /** Writes processed frames into the ring; what a pause interrupts is kept for the restart. */
+    void writeOut(const double* data, size_t frames) {
+        if (m_pendingFrames > 0) {
+            // Earlier frames are still waiting: keep the order.
+            m_pending.insert(m_pending.end(), data, data + frames * m_outChannels);
+            m_pendingFrames += frames;
+            return;
+        }
         size_t done = 0;
         while (done < frames && !stopRequested() && m_seekRequest.load(std::memory_order_acquire) < 0) {
             const size_t n = m_output->write(data + done * m_outChannels, frames - done);
@@ -657,8 +741,8 @@ private:
             // Stopped (pause) with samples already decoded: keep them for the
             // next start, otherwise resume would skip this part of the block.
             const size_t samples = (frames - done) * m_outChannels;
-            m_pending.assign(data + done * m_outChannels, data + done * m_outChannels + samples);
-            m_pendingFrames = frames - done;
+            m_pending.insert(m_pending.end(), data + done * m_outChannels, data + done * m_outChannels + samples);
+            m_pendingFrames += frames - done;
         }
     }
 
@@ -715,6 +799,7 @@ private:
     bool finishOrAdvance() {
         // Drain first and only then take the next track, so clearNext() or a
         // seek during the drain still cancels a format-change transition.
+        flushLimiter();
         if (!drainOutput()) return false;
         m_prevDecoder.reset();
         std::unique_ptr<decoders::IAudioDecoder> next;
@@ -737,6 +822,7 @@ private:
         m_decoder = std::move(next);
         m_gainLinear = gain;
         m_pendingFrames = 0;
+        m_pending.clear();
         prepareDsp(info.sampleRate, info.channels);
         m_startRampRemaining = 0;
         {
@@ -791,9 +877,13 @@ private:
     size_t m_startRampRemaining = 0;
     AudioBuffer m_source{1, 1, 48000};
     std::vector<double> m_work;
-    dsp::GraphicEqProcessor m_eq;
+    dsp::ParametricEq m_eq;
     dsp::TimeStretchProcessor m_stretch;
     dsp::StereoDownmix m_downmix;
+    dsp::Crossfeed m_crossfeed;
+    dsp::TruePeakLimiter m_limiter;
+    bool m_limiterOn = true;
+    std::vector<double> m_limited;
 
     // Gapless look-ahead: the finished decoder until its tail is audible.
     std::unique_ptr<decoders::IAudioDecoder> m_prevDecoder;
@@ -807,9 +897,15 @@ private:
     double m_nextGain = 1.0;
 
     std::mutex m_eqMutex;
-    std::array<double, dsp::GraphicEqProcessor::BandCount> m_eqGains{};
+    std::array<double, 5> m_graphic{};
+    std::vector<dsp::EqBand> m_eqBands;
+    double m_eqUserPreampDb = 0.0;
     bool m_eqEnabled = false;
     std::atomic<bool> m_eqDirty{true};
+
+    std::atomic<int> m_crossfeedPreset{0};
+    std::atomic<bool> m_limiterWanted{true};
+    std::atomic<double> m_limiterMinGain{1.0};
 
     mutable std::mutex m_infoMutex;
     mutable TrackInfo m_current;

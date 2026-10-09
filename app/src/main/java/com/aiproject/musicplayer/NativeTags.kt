@@ -49,7 +49,11 @@ object NativeTags {
     /** Duration from the engine's own decoders (formats MediaMetadataRetriever does not know), or 0. */
     fun durationMs(fd: Int): Long = probeDurationMs(fd)
 
+    /** EBU R128 of the whole file or range: [LUFS, true peak dBTP, seconds], or null. Slow: background only. */
+    fun loudness(fd: Int, startUs: Long, endUs: Long): DoubleArray? = analyzeLoudness(fd, startUs, endUs)
+
     @JvmStatic private external fun readTags(fd: Int): ByteArray?
+    @JvmStatic private external fun analyzeLoudness(fd: Int, startUs: Long, endUs: Long): DoubleArray?
     @JvmStatic private external fun readPicture(fd: Int): ByteArray?
     @JvmStatic private external fun probeDurationMs(fd: Int): Long
 }

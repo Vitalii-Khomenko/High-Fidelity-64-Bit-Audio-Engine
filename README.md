@@ -23,7 +23,8 @@ output stage, with a Kotlin / Jetpack Compose app on top.
 | **Gapless** | The next track is pre-opened; same-format tracks join sample-exactly, a format change reopens the stream after the queue drains. |
 | **Transport** | Pause and resume stop and restart consumption at an exact frame — no re-seek, no lost samples. Volume and fades act after the buffer, so they are heard immediately. |
 | **Speed** | 0.75× – 2.0× with pitch preserved (Sonic, converted to float processing). At exactly 1.00× samples pass untouched. |
-| **Loudness** | ReplayGain (track / album) from Vorbis comments, Opus R128 gains, ID3v2, APEv2 and MP4 tags, limited by the tagged peak; EQ boosts lower the level automatically; a peak limiter guards the output. |
+| **Loudness** | ReplayGain (track / album) from Vorbis comments, Opus R128 gains, ID3v2, APEv2 and MP4 tags, limited by the tagged peak. Files without tags are measured (EBU R128, true peak) in the background and normalised the same way. A true-peak limiter keeps inter-sample peaks under −1 dBTP (bit-exact below it). |
+| **EQ and crossfeed** | Parametric EQ with up to 20 filters, five-band graphic mode, AutoEQ headphone profiles (searchable in the app, ~9000 models) or any Equalizer APO file; headroom from the real response peak. bs2b crossfeed for headphones (three presets). |
 | **Robustness** | Device switches (Bluetooth, USB, headphones) reopen the stream with the same format; unsupported multichannel layouts fold down to stereo; Oboe resamples when the device refuses a rate. |
 
 Measured by the native test suite (`tests/native`), on the host:
@@ -39,7 +40,7 @@ Details: [docs/AUDIO_ENGINE.md](docs/AUDIO_ENGINE.md).
 
 - **Player** — cover, title, artist and album, format chips (codec, rate, bits, DSD, ReplayGain, output), a pixel spectrum of what is actually being heard, transport, shuffle / repeat, and the queue.
 - **Library** — **albums** (cover grid) and **artists** built from the tags of your folders, with search; **sources**: folders through the Storage Access Framework (with a folder browser and CUE sheets), a device scan (MediaStore), DLNA / UPnP servers with folder navigation, and saved playlists.
-- **Sound** — volume, speed and time-stretch profile, 5-band EQ, ReplayGain mode.
+- **Sound** — volume, speed and time-stretch profile, EQ (5 bands or parametric with AutoEQ), crossfeed, ReplayGain mode, loudness measurement, true-peak limiter.
 - **Settings** — theme (system / dark / light), *Music* or *Books* listening mode (Books keeps a bookmark per file and marks finished chapters), sleep timer with a 30-second fade, and the signal path from file to device.
 
 Playback lives in a foreground service with a media session: notification,

@@ -8,14 +8,15 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [PlaylistTrackEntity::class, PlaylistEntity::class, LibraryTrackEntity::class],
-    version = 6,
+    entities = [PlaylistTrackEntity::class, PlaylistEntity::class, LibraryTrackEntity::class, LoudnessEntity::class],
+    version = 7,
     exportSchema = false,
 )
 abstract class MusicDatabase : RoomDatabase() {
     abstract fun trackDao(): TrackDao
     abstract fun playlistDao(): PlaylistDao
     abstract fun libraryDao(): LibraryDao
+    abstract fun loudnessDao(): LoudnessDao
 
     companion object {
         private val MIGRATION_3_4 = object : Migration(3, 4) {
@@ -96,6 +97,16 @@ abstract class MusicDatabase : RoomDatabase() {
             }
         }
 
+        /** 0.13: EBU R128 measurements of untagged files. */
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `loudness` (`uri` TEXT NOT NULL, `lufs` REAL, `truePeakDb` REAL, " +
+                        "`seconds` REAL NOT NULL, `analyzedAt` INTEGER NOT NULL, PRIMARY KEY(`uri`))",
+                )
+            }
+        }
+
         @Volatile
         private var INSTANCE: MusicDatabase? = null
 
@@ -106,7 +117,7 @@ abstract class MusicDatabase : RoomDatabase() {
                     MusicDatabase::class.java,
                     "musicplayer_database"
                 )
-                .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                 .build()
                 INSTANCE = instance
                 instance

@@ -13,6 +13,7 @@
 #include "../core/AudioPlayer.h"
 #include "../decoders/DecoderFactory.h"
 #include "../decoders/DurationProbe.h"
+#include "../decoders/LoudnessScan.h"
 #include "../decoders/RangeDecoder.h"
 #include "../decoders/ReplayGainScanner.h"
 #include "../tags/TagReader.h"
@@ -69,11 +70,36 @@ std::unique_ptr<dec::IAudioDecoder> openDecoder(int fd, jlong startUs, jlong end
     return dec::RangeDecoder::wrap(dec::openDecoder(fd), startUs, endUs);
 }
 
-double gainFor(int fd, jint replayGainMode) {
+/**
+ * Gain for a track: its ReplayGain tags, or else the app's measured values
+ * (EBU R128 analysis, NaN when unknown) for files without tags.
+ */
+double gainFor(int fd, jint replayGainMode, const jdouble* fallback) {
     const auto mode = static_cast<dec::ReplayGainMode>(replayGainMode);
     if (mode == dec::ReplayGainMode::Off) return 1.0;
-    return dec::replayGainLinear(dec::readReplayGain(fd), mode);
+    dec::ReplayGainInfo info = dec::readReplayGain(fd);
+    if (!info.hasTrack && !info.hasAlbum && fallback) {
+        if (std::isfinite(fallback[0])) {
+            info.hasTrack = true;
+            info.trackGainDb = static_cast<float>(fallback[0]);
+            info.trackPeak = std::isfinite(fallback[1]) ? static_cast<float>(fallback[1]) : 0.0f;
+        }
+        if (std::isfinite(fallback[2])) {
+            info.hasAlbum = true;
+            info.albumGainDb = static_cast<float>(fallback[2]);
+            info.albumPeak = std::isfinite(fallback[3]) ? static_cast<float>(fallback[3]) : 0.0f;
+        }
+    }
+    return dec::replayGainLinear(info, mode);
 }
+
+/** [trackGainDb, trackPeak, albumGainDb, albumPeak] from Kotlin, or all NaN. */
+struct Fallback {
+    jdouble v[4] = {NAN, NAN, NAN, NAN};
+    Fallback(JNIEnv* env, jdoubleArray a) {
+        if (a && env->GetArrayLength(a) >= 4) env->GetDoubleArrayRegion(a, 0, 4, v);
+    }
+};
 
 } // namespace
 
@@ -104,29 +130,31 @@ Java_com_aiproject_musicplayer_AudioEngine_nativeRelease(JNIEnv*, jobject, jlong
 
 /** Takes ownership of fd. */
 JNIEXPORT jboolean JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeLoad(JNIEnv*, jobject, jlong id, jint fd, jint replayGainMode,
-                                                      jlong startUs, jlong endUs) {
+Java_com_aiproject_musicplayer_AudioEngine_nativeLoad(JNIEnv* env, jobject, jlong id, jint fd, jint replayGainMode,
+                                                      jlong startUs, jlong endUs, jdoubleArray fallbackGain) {
+    const Fallback fallback(env, fallbackGain);
     OwnedFd owned{fd};
     auto inst = instance(id);
     if (fd < 0 || !inst) return JNI_FALSE;
     inst->invalidateNext();  // any pre-load still being opened is stale now
     auto decoder = openDecoder(fd, startUs, endUs);
     if (!decoder) return JNI_FALSE;
-    const double gain = gainFor(fd, replayGainMode);
+    const double gain = gainFor(fd, replayGainMode, fallback.v);
     return inst->player->load(std::move(decoder), gain) ? JNI_TRUE : JNI_FALSE;
 }
 
 /** Takes ownership of fd. Ignored if load()/clearNext() happened meanwhile. */
 JNIEXPORT jboolean JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeLoadNext(JNIEnv*, jobject, jlong id, jint fd, jint replayGainMode,
-                                                          jlong startUs, jlong endUs) {
+Java_com_aiproject_musicplayer_AudioEngine_nativeLoadNext(JNIEnv* env, jobject, jlong id, jint fd, jint replayGainMode,
+                                                          jlong startUs, jlong endUs, jdoubleArray fallbackGain) {
+    const Fallback fallback(env, fallbackGain);
     OwnedFd owned{fd};
     auto inst = instance(id);
     if (fd < 0 || !inst) return JNI_FALSE;
     const uint64_t generation = inst->generation();
     auto decoder = openDecoder(fd, startUs, endUs);
     if (!decoder) return JNI_FALSE;
-    const double gain = gainFor(fd, replayGainMode);
+    const double gain = gainFor(fd, replayGainMode, fallback.v);
     {
         std::lock_guard<std::mutex> lock(inst->nextLock);
         if (generation != inst->nextGeneration) return JNI_FALSE;
@@ -180,15 +208,32 @@ Java_com_aiproject_musicplayer_AudioEngine_nativeSetSpeedMode(JNIEnv*, jobject, 
     if (auto p = player(id)) p->setSpeedMode(mode);
 }
 
+/** bands: [type, frequency, q, gainDb] per band (dsp::EqBandType ids). */
 JNIEXPORT void JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeSetEqEnabled(JNIEnv*, jobject, jlong id, jboolean enabled) {
-    if (auto p = player(id)) p->setEqEnabled(enabled == JNI_TRUE);
+Java_com_aiproject_musicplayer_AudioEngine_nativeSetEq(JNIEnv* env, jobject, jlong id, jboolean enabled, jdouble preampDb,
+                                                       jdoubleArray bands) {
+    std::vector<audio_engine::dsp::EqBand> list;
+    if (bands) {
+        const jsize n = env->GetArrayLength(bands);
+        std::vector<jdouble> v(static_cast<size_t>(n));
+        env->GetDoubleArrayRegion(bands, 0, n, v.data());
+        for (jsize i = 0; i + 3 < n && list.size() < audio_engine::dsp::ParametricEq::kMaxBands; i += 4) {
+            const int type = static_cast<int>(v[i]);
+            if (type < 0 || type > 4 || !std::isfinite(v[i + 1]) || !std::isfinite(v[i + 2]) || !std::isfinite(v[i + 3])) continue;
+            list.push_back({static_cast<audio_engine::dsp::EqBandType>(type), v[i + 1], v[i + 2], v[i + 3]});
+        }
+    }
+    if (auto p = player(id)) p->setEq(enabled == JNI_TRUE, preampDb, std::move(list));
 }
 
 JNIEXPORT void JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeSetEqBand(JNIEnv*, jobject, jlong id, jint band, jdouble gainDb) {
-    if (band < 0) return;
-    if (auto p = player(id)) p->setEqBandGain(static_cast<size_t>(band), gainDb);
+Java_com_aiproject_musicplayer_AudioEngine_nativeSetCrossfeed(JNIEnv*, jobject, jlong id, jint preset) {
+    if (auto p = player(id)) p->setCrossfeed(preset);
+}
+
+JNIEXPORT void JNICALL
+Java_com_aiproject_musicplayer_AudioEngine_nativeSetLimiter(JNIEnv*, jobject, jlong id, jboolean enabled) {
+    if (auto p = player(id)) p->setLimiter(enabled == JNI_TRUE);
 }
 
 JNIEXPORT jint JNICALL
@@ -292,6 +337,22 @@ Java_com_aiproject_musicplayer_NativeTags_readPicture(JNIEnv* env, jclass, jint 
     if (data.empty() || data.size() > 0x7fffffff) return nullptr;
     jbyteArray out = env->NewByteArray(static_cast<jsize>(data.size()));
     if (out) env->SetByteArrayRegion(out, 0, static_cast<jsize>(data.size()), reinterpret_cast<const jbyte*>(data.data()));
+    return out;
+}
+
+/**
+ * Decodes the whole file (or CUE range) and returns [integrated LUFS, true
+ * peak dBTP, seconds], or null when it cannot be decoded. Seconds to minutes
+ * of CPU for long files: call from a background thread.
+ */
+JNIEXPORT jdoubleArray JNICALL
+Java_com_aiproject_musicplayer_NativeTags_analyzeLoudness(JNIEnv* env, jclass, jint fd, jlong startUs, jlong endUs) {
+    if (fd < 0) return nullptr;
+    const auto r = dec::scanLoudness(fd, startUs, endUs);
+    if (!r.ok) return nullptr;
+    const jdouble values[3] = {r.integratedLufs, r.truePeakDb, r.seconds};
+    jdoubleArray out = env->NewDoubleArray(3);
+    if (out) env->SetDoubleArrayRegion(out, 0, 3, values);
     return out;
 }
 

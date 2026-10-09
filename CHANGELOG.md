@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.13.0 — 2026-10-09
+
+### Sound
+
+- **Parametric EQ** (up to 20 filters: peak, shelves, low / high pass) replaces the fixed five-band EQ in the engine; the five sliders remain as the *5 bands* mode. Headroom comes from the real peak of the response, so an EQ never clips.
+- **AutoEQ**: search ~9000 measured headphones from the app and apply their correction, or import any AutoEQ / Equalizer APO `ParametricEQ.txt`.
+- **Crossfeed** for headphones (bs2b, Chu Moy, Jan Meier presets), in double precision; mono passes at unity, *Off* is bit-exact.
+- **True-peak limiter** (−1 dBTP, 4x oversampled detection, 1.5 ms look-ahead, 50 ms release) in the decode path: no inter-sample overs after gain and EQ, bit-exact below the ceiling, no samples added or lost (its latency is accounted for at gapless boundaries).
+- **EBU R128 loudness**: files without ReplayGain tags are measured in the background (the current and next track, or the whole library on request) and normalised to −18 LUFS with their true peak, like tagged files. Album gain from the album's measured tracks.
+
+### Engine
+
+- Native tests for all of it (`tests/native/dsp_tests.cpp`, EBU Tech 3341 reference sine) and a player test that switches the limiter and crossfeed while playing and across a gapless boundary.
+- Database version 7 (loudness measurements).
+
 ## 0.12.0 — 2026-10-09
 
 ### Library

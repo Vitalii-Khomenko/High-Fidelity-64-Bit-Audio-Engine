@@ -15,6 +15,10 @@ data class PlayerSettings(
     val replayGain: ReplayGainMode = ReplayGainMode.TRACK,
     val repeat: RepeatMode = RepeatMode.OFF,
     val sortMode: SortMode = SortMode.ALBUM,
+    val crossfeed: CrossfeedMode = CrossfeedMode.OFF,
+    val limiter: Boolean = true,
+    /** Measure (EBU R128) upcoming tracks that have no ReplayGain tags. */
+    val autoAnalyze: Boolean = true,
 )
 
 data class SavedQueue(
@@ -39,10 +43,16 @@ class PlayerStore(context: Context) {
         speed = PlaybackSpeed.clamp(prefs.getFloat(KEY_SPEED, 1f)),
         speedMode = SpeedMode.fromId(prefs.getInt(KEY_SPEED_MODE, SpeedMode.MUSIC.id)),
         volume = prefs.getFloat(KEY_VOLUME, 1f).takeIf { it.isFinite() }?.coerceIn(0f, 1f) ?: 1f,
-        eq = EqSettings.deserialize(prefs.getBoolean(KEY_EQ_ENABLED, false), prefs.getString(KEY_EQ_GAINS, null)),
+        eq = EqSettings.deserialize(
+            prefs.getBoolean(KEY_EQ_ENABLED, false), prefs.getString(KEY_EQ_GAINS, null),
+            prefs.getInt(KEY_EQ_MODE, 0), prefs.getString(KEY_EQ_PROFILE, null),
+        ),
         replayGain = ReplayGainMode.fromId(prefs.getInt(KEY_REPLAY_GAIN, ReplayGainMode.TRACK.id)),
         repeat = RepeatMode.fromId(prefs.getInt(KEY_REPEAT, RepeatMode.OFF.id)),
         sortMode = SortMode.fromId(prefs.getInt(KEY_SORT_MODE, SortMode.ALBUM.id)),
+        crossfeed = CrossfeedMode.fromId(prefs.getInt(KEY_CROSSFEED, 0)),
+        limiter = prefs.getBoolean(KEY_LIMITER, true),
+        autoAnalyze = prefs.getBoolean(KEY_AUTO_ANALYZE, true),
     )
 
     fun saveSettings(s: PlayerSettings) {
@@ -56,6 +66,11 @@ class PlayerStore(context: Context) {
             .putInt(KEY_REPLAY_GAIN, s.replayGain.id)
             .putInt(KEY_REPEAT, s.repeat.id)
             .putInt(KEY_SORT_MODE, s.sortMode.id)
+            .putInt(KEY_EQ_MODE, s.eq.mode.id)
+            .putString(KEY_EQ_PROFILE, s.eq.profile?.serialize())
+            .putInt(KEY_CROSSFEED, s.crossfeed.id)
+            .putBoolean(KEY_LIMITER, s.limiter)
+            .putBoolean(KEY_AUTO_ANALYZE, s.autoAnalyze)
             .apply()
     }
 
@@ -140,6 +155,11 @@ class PlayerStore(context: Context) {
         private const val KEY_REPEAT = "repeat_mode"
         private const val KEY_SORT_MODE = "playlist_sort_mode"
         private const val KEY_PLAYED = "played_uris"
+        private const val KEY_EQ_MODE = "eq_mode"
+        private const val KEY_EQ_PROFILE = "eq_profile"
+        private const val KEY_CROSSFEED = "crossfeed_mode"
+        private const val KEY_LIMITER = "true_peak_limiter"
+        private const val KEY_AUTO_ANALYZE = "loudness_auto_analyze"
 
         fun encodeTracks(tracks: List<Track>): String = JSONArray().apply {
             tracks.forEach { t ->

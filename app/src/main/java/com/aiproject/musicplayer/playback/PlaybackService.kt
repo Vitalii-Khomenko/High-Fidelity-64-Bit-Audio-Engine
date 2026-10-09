@@ -84,6 +84,11 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val engineExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "engine-control") }
     private val engineDispatcher = engineExecutor.asCoroutineDispatcher()
+    // Loudness analysis decodes whole files: one at a time, at low priority.
+    private val analysisExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread({ Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND); r.run() }, "loudness")
+    }
+    private val analysisDispatcher = analysisExecutor.asCoroutineDispatcher()
 
     private lateinit var engine: AudioEngine
     private lateinit var store: PlayerStore
@@ -95,6 +100,10 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
     private var libraryProgress: LibraryIndex.Progress? = null
     private var enrichJob: Job? = null
     private val probed = HashSet<String>()          // queue tracks already completed (or tried)
+    private lateinit var loudness: LoudnessAnalyzer
+    private var analysisJob: Job? = null            // upcoming queue tracks
+    private var libraryAnalysisJob: Job? = null
+    private var analysisProgress: Pair<Int, Int>? = null
     private var art: Bitmap? = null                 // cover of the current track
     private var artUri: String? = null
     private var artJob: Job? = null
@@ -169,6 +178,7 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         sessionToken = session.sessionToken   // lets Android Auto and other browsers connect
         browseTree = BrowseTree(this)
         library = LibraryIndex(this)
+        loudness = LoudnessAnalyzer(this)
         ContextCompat.registerReceiver(
             this, noisyReceiver, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY), ContextCompat.RECEIVER_NOT_EXPORTED,
         )
@@ -365,6 +375,7 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         // Release on the engine thread so it runs after any queued transport call.
         engineExecutor.execute { engine.release() }
         engineExecutor.shutdown()
+        analysisExecutor.shutdown()
         super.onDestroy()
     }
 
@@ -596,6 +607,63 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         invalidatePreload()
     }
 
+    override fun setCrossfeed(mode: CrossfeedMode) {
+        updateSettings(settings.copy(crossfeed = mode))
+        engine.setCrossfeed(mode)
+    }
+
+    override fun setLimiter(enabled: Boolean) {
+        updateSettings(settings.copy(limiter = enabled))
+        engine.setLimiter(enabled)
+    }
+
+    override fun setAutoAnalyze(enabled: Boolean) {
+        updateSettings(settings.copy(autoAnalyze = enabled))
+        if (enabled) scheduleAnalysis() else analysisJob?.cancel()
+    }
+
+    override fun analyzeLibrary() {
+        if (libraryAnalysisJob?.isActive == true) return
+        libraryAnalysisJob = scope.launch {
+            try {
+                val pending = withContext(Dispatchers.IO) { loudness.libraryPending() }
+                pending.forEachIndexed { i, uri ->
+                    analysisProgress = i to pending.size
+                    publish()
+                    withContext(analysisDispatcher) { loudness.analyze(uri) }
+                }
+            } finally {
+                analysisProgress = null
+                libraryAnalysisJob = null
+                publish()
+            }
+        }
+    }
+
+    override fun cancelAnalysis() {
+        libraryAnalysisJob?.cancel()
+    }
+
+    /** Measures the current and the next two tracks if they have no ReplayGain tags, one at a time. */
+    private fun scheduleAnalysis() {
+        if (!settings.autoAnalyze || analysisJob?.isActive == true) return
+        val upcoming = buildList {
+            val next = queue.peekNext(auto = true)
+            queue.tracks.getOrNull(next)?.let(::add)
+            queue.current?.let(::add)
+        }.map { it.uri }.distinct()
+        if (upcoming.isEmpty()) return
+        analysisJob = scope.launch {
+            for (uri in upcoming) {
+                val needed = withContext(Dispatchers.IO) { loudness.needsAnalysis(uri) }
+                if (!needed) continue
+                withContext(analysisDispatcher) { loudness.analyze(uri) }
+                // A measured next track replaces the pre-loaded one so its gain applies.
+                if (uri == preloadedUri) invalidatePreload()
+            }
+        }
+    }
+
     override fun setContentMode(mode: ContentMode) {
         updateSettings(settings.copy(contentMode = mode))
     }
@@ -749,8 +817,13 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
                 val playable = withContext(Dispatchers.IO) {
                     DlnaPlaybackCache.resolvePlaybackUri(Uri.parse(track.uri), cacheDir)
                 }
+                val measured = if (settings.replayGain != ReplayGainMode.OFF) {
+                    withContext(Dispatchers.IO) { runCatching { loudness.fallbackFor(track.uri) }.getOrNull() }
+                } else {
+                    null
+                }
                 withContext(engineDispatcher) {
-                    if (!engine.load(this@PlaybackService, playable, settings.replayGain)) return@withContext false
+                    if (!engine.load(this@PlaybackService, playable, settings.replayGain, measured)) return@withContext false
                     if (startMs > 0L) engine.seekTo(startMs)
                     ensureActive()  // a newer request replaced this one: load, but do not start
                     engine.play()
@@ -807,6 +880,7 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         publish()
         updateSessionMetadata()
         updateNotification()
+        scheduleAnalysis()
     }
 
     private fun failCurrent(track: Track, auto: Boolean) {
@@ -882,7 +956,10 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
                 }
                 // loadNext only touches the engine's next-track slot; no need to
                 // wait behind transport calls.
-                withContext(Dispatchers.IO) { engine.loadNext(this@PlaybackService, playable, replayGain) }
+                withContext(Dispatchers.IO) {
+                    val measured = if (replayGain != ReplayGainMode.OFF) runCatching { loudness.fallbackFor(track.uri) }.getOrNull() else null
+                    engine.loadNext(this@PlaybackService, playable, replayGain, measured)
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -990,6 +1067,8 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         _position.value = PlaybackPosition(pendingStartMs, current?.durationMs ?: 0L)
         engine.setSpeed(settings.speed.toDouble())
         engine.setSpeedMode(settings.speedMode.id)
+        engine.setCrossfeed(settings.crossfeed)
+        engine.setLimiter(settings.limiter)
         applyEq(settings.eq)
         applyVolume()
         publish()
@@ -1076,6 +1155,7 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
             sleepTimerEndsAt = sleepDeadline,
             importing = importing,
             libraryUpdate = libraryProgress,
+            analysis = analysisProgress,
         )
         if (::browseTree.isInitialized) publishSessionQueue()
         updateSessionState()
@@ -1085,10 +1165,7 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         engine.setVolume(settings.volume * duckFactor * sleepFactor)
     }
 
-    private fun applyEq(eq: EqSettings) {
-        engine.setEqEnabled(eq.enabled)
-        eq.bandGainsDb.forEachIndexed { band, gain -> engine.setEqBand(band, gain.toDouble()) }
-    }
+    private fun applyEq(eq: EqSettings) = engine.setEq(eq)
 
     // ── Audio focus ──────────────────────────────────────────────────────────
 

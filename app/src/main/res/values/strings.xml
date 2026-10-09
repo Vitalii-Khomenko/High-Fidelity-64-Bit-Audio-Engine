@@ -147,4 +147,27 @@
         <item quantity="one">%d album</item>
         <item quantity="other">%d albums</item>
     </plurals>
+    <!-- Sound: parametric EQ, crossfeed, loudness -->
+    <string name="eq_graphic">5 bands</string>
+    <string name="eq_parametric">Parametric</string>
+    <string name="eq_no_profile">No profile loaded. Find your headphones in AutoEQ or import a ParametricEQ.txt (AutoEQ / Equalizer APO format).</string>
+    <string name="eq_autoeq">AutoEQ</string>
+    <string name="eq_import">Import file</string>
+    <string name="eq_import_failed">No parametric filters found in that file</string>
+    <string name="eq_parametric_hint">Up to 20 filters in 64-bit. Headroom is set from the profile\'s real peak, so it never clips.</string>
+    <string name="eq_autoeq_title">AutoEQ headphone profiles</string>
+    <string name="eq_autoeq_hint">Model, e.g. HD 600</string>
+    <string name="eq_autoeq_offline">The AutoEQ index could not be loaded (no connection?)</string>
+    <string name="crossfeed">Crossfeed</string>
+    <string name="crossfeed_default">bs2b</string>
+    <string name="crossfeed_cmoy">Chu Moy</string>
+    <string name="crossfeed_meier">Meier</string>
+    <string name="crossfeed_hint">For headphones: each ear also hears a little of the other channel\'s bass, like speakers in a room. Mono stays as it is.</string>
+    <string name="loudness">Loudness</string>
+    <string name="analyze_untagged">Measure files without ReplayGain</string>
+    <string name="analyze_hint">The current and next track are measured (EBU R128) in the background and then play at the same loudness as tagged files.</string>
+    <string name="analyze_library">Measure library</string>
+    <string name="analyzing">Measuring %1$d / %2$d</string>
+    <string name="limiter">True-peak limiter</string>
+    <string name="limiter_hint">Keeps inter-sample peaks under −1 dBTP after gain and EQ. Below that the signal passes bit-exact.</string>
 </resources>

@@ -124,6 +124,17 @@ public:
         }
     }
 
+    /** |H(f)| of the current coefficients, linear. */
+    double magnitudeAt(double frequency) const {
+        if (m_sampleRate == 0) return 1.0;
+        const double w = 2.0 * M_PI * frequency / m_sampleRate;
+        const double c1 = std::cos(w), s1 = std::sin(w), c2 = std::cos(2 * w), s2 = std::sin(2 * w);
+        const double nr = m_b0 + m_b1 * c1 + m_b2 * c2, ni = -(m_b1 * s1 + m_b2 * s2);
+        const double dr = m_a0 + m_a1 * c1 + m_a2 * c2, di = -(m_a1 * s1 + m_a2 * s2);
+        const double den = dr * dr + di * di;
+        return den > 0.0 ? std::sqrt((nr * nr + ni * ni) / den) : 1.0;
+    }
+
 private:
     void calculateCoefficients() {
         if (m_sampleRate == 0) return;
