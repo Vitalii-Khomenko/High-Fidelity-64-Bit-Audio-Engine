@@ -136,16 +136,49 @@ The callback never blocks on it.
 
 | Decoder | Library | Notes |
 |---|---|---|
-| `FlacDecoder` | dr_flac | s32 output, exact |
+| `FlacDecoder` | dr_flac | FLAC and Ogg FLAC; s32 output, exact |
 | `WavDecoder` | dr_wav | RIFF, RIFX, RF64, W64, AIFF/AIFC; integer PCM via s32, 64-bit float read natively, others (A-law, µ-law, ADPCM, 32-bit float) via f32 |
 | `Mp3Decoder` | dr_mp3 | One pass over the frame headers at open: exact frame count and a seek point about every second. Encoder delay and padding from the LAME header are honoured. |
 | `DsdDecoder` | own | DSF and uncompressed DSDIFF, see below |
+| `WavPackDecoder` | libwavpack 5.7 | Lossless and hybrid (without `.wvc`), integer up to 32-bit and float; bit-exact |
+| `ApeDecoder` | Monkey's Audio SDK 13.27 | All compression levels, 8–32-bit, float; bit-exact |
+| `TtaDecoder` | libtta++ 2.3 (`libtta.so`, LGPL) | 16/24-bit; libtta seeks to frame starts (~1 s), the rest is decoded and dropped, so seeks are sample-exact |
+| `VorbisDecoder` | libvorbis 1.3.7 + vorbisfile | Sample-exact seeks |
+| `OggOpusDecoder` | libopus 1.5.2 + opusfile 0.12 | Always 48 kHz; pre-skip, end trimming and header gain applied, so Opus albums are gapless |
+| `MediaCodecDecoder` | Android `MediaExtractor` + `MediaCodec` | AAC / HE-AAC (M4A, MP4, ADTS), ALAC, and whatever else the phone decodes (Matroska / WebM, AMR, …). See below. |
+| `RangeDecoder` | — | A `[start, end)` section of another decoder: a CUE sheet track |
 
 Every decoder reads through `FileSource`: a private `dup()` of the descriptor
 with its own offset and `pread()`, so decoders never share a file position with
-each other or with the tag reader. The JNI layer sniffs the file signature
-(`fLaC`, `RIFF`/`RF64`/`FORM`, `DSD `/`FRM8`, `ID3`/MPEG sync) and falls back to
-trying FLAC, WAV and MP3 for unknown headers.
+each other or with the tag reader. The libraries' I/O callbacks (vorbisfile,
+opusfile, WavPack stream reader, `IAPEIO`, `TTA_io_callback`) are thin adapters
+over it.
+
+**Container sniffing** (`decoders/DecoderFactory.h`): an ID3v2 tag at the start
+is skipped, then the signature decides — `fLaC`, `OggS` (the first packet tells
+Opus, Vorbis and FLAC apart), `RIFF`/`RF64`/`FORM`, `DSD `/`FRM8`, `wvpk`,
+`MAC `, `TTA1`, `ftyp` (MP4), EBML (Matroska), ADTS sync (layer bits 00) and
+MPEG audio sync. Unknown headers fall back to FLAC, WAV and MP3, and finally
+MediaCodec. Multichannel Vorbis and Opus are reordered from the Vorbis channel
+order to the WAVE order the rest of the engine uses.
+
+**MediaCodec** decoders are asked for float PCM; ones that ignore it deliver
+16-, 24- or 32-bit integers, which are converted exactly. The decoder's own
+output format wins over the container (HE-AAC doubles the rate, parametric
+stereo turns mono into stereo). Encoder delay and padding from the container
+(`encoder-delay` / `encoder-padding`, i.e. iTunSMPB and edit lists) are
+trimmed, so AAC albums are gapless. A seek starts 100 ms early and drops
+everything before the target, which avoids the MDCT warm-up glitch and makes it
+sample-exact. Format keys are spelled out instead of `AMEDIAFORMAT_KEY_*`
+because several of those constants only exist from API 28/29. The decoder
+reports its first block while opening, so a stream the phone cannot decode
+fails to load instead of failing mid-playback.
+
+**CUE sheets**: the app sends a start and an end time with the file
+(microseconds; the CUE's 1/75 s frames are exact at the sample level). The
+engine wraps the decoder in a `RangeDecoder`; consecutive tracks of one file
+share their cut point, so the normal gapless path joins them without a gap or
+an overlap.
 
 ## DSD to PCM
 
@@ -169,17 +202,36 @@ Filter histories start from the DSD idle pattern `0x69`, not zero.
 Throughput on a desktop core (single thread, stereo): DSD64 81×, DSD128 39×,
 DSD256 18×, DSD512 9× real time.
 
-## ReplayGain (`decoders/ReplayGainScanner.h`)
+## Tags and ReplayGain (`tags/TagReader.h`)
 
-Read with `pread` (the file position is untouched):
+One reader serves the library (title, artist, album, album artist, track and
+disc numbers, year, genre, lyrics, cover) and the engine (ReplayGain). It uses
+`pread` only, so the descriptor's file position is untouched:
 
-- FLAC: the `VORBIS_COMMENT` metadata block;
-- MP3: ID3v2.2/2.3/2.4 `TXXX` frames — Latin-1, UTF-16 with BOM (repeated BOMs
-  of v2.3 included), UTF-16BE, UTF-8; tag-level unsynchronisation and extended
-  headers are handled;
-- WAV / RF64 and AIFF: an `id3 ` / `ID3 ` chunk;
-- DSF: the ID3v2 tag at the metadata pointer;
-- anything else: a plain-text scan of the first 64 KiB.
+- FLAC: `VORBIS_COMMENT` and `PICTURE` blocks;
+- Ogg Vorbis / Opus / FLAC: the comment packet (reassembled across pages),
+  `METADATA_BLOCK_PICTURE`; Opus `R128_TRACK_GAIN` / `R128_ALBUM_GAIN`
+  (Q7.8 dB at −23 LUFS) become ReplayGain values (+5 dB to the −18 LUFS
+  reference);
+- ID3v2.2 / 2.3 / 2.4 (MP3, and inside WAV, AIFF, DSF, DFF, TTA, APE):
+  text frames, `TXXX`, `USLT`, `APIC` / `PIC`; Latin-1, UTF-16 (with repeated
+  BOMs), UTF-16BE, UTF-8; tag-level and frame-level unsynchronisation, data
+  length indicators, extended headers; compressed or encrypted frames are
+  skipped;
+- APEv2 (APE, WavPack, TTA, MP3) including binary cover items; ID3v1 as the
+  last fallback;
+- MP4 / M4A: `moov/udta/meta/ilst` (`©nam`, `©ART`, `aART`, `©alb`, `©day`,
+  `trkn`, `disk`, `gnre`, `covr`, `©lyr`, and `----` freeform items such as
+  `replaygain_track_gain`);
+- WAV `LIST/INFO`;
+- a plain-text scan of the first 64 KiB as the last resort for ReplayGain.
+
+Several tag blocks may exist in one file; the first one read fills a field and
+later ones only fill what is still empty. Text marked as Latin-1 is decoded as
+Windows-1251 when most of its letters are in the upper half (Cyrillic tags
+written by Windows software), and stays Latin-1 for Western text with a few
+accented letters. A front cover beats any other picture. Large pictures are
+read only when asked for.
 
 `REPLAYGAIN_TRACK_GAIN`, `_PEAK`, `ALBUM_GAIN`, `_PEAK` are parsed locale-
 independently. The applied linear gain is limited to `1 / peak` when a peak is
@@ -214,10 +266,16 @@ heard rather than what was decoded 300 ms earlier.
 
 | Kotlin (`AudioEngine`) | Native |
 |---|---|
-| `load(context, uri, replayGain)` / `loadNext(...)` | Takes ownership of a detached fd; opens the decoder **outside** any global lock, then calls `load()` / `setNext()` |
+| `load(context, uri, replayGain)` / `loadNext(...)` | Takes ownership of a detached fd; opens the decoder **outside** any global lock (a CUE range is split off the URI and passed as start / end), then calls `load()` / `setNext()` |
 | `play()`, `pause()`, `stop()`, `seekTo(ms)` | Transport |
 | `setVolume`, `setSpeed`, `setSpeedMode`, `setEqEnabled`, `setEqBand` | Controls |
 | `state()`, `positionMs()`, `durationMs()`, `format()`, `consumeTrackAdvanced()`, `spectrum()` | Non-blocking queries |
+
+`NativeTags` (no instance; the caller keeps the fd): `readTags(fd)` returns the
+fields as NUL-separated UTF-8 bytes (JNI `NewStringUTF` cannot take 4-byte
+UTF-8), `readPicture(fd)` the cover bytes, `probeDurationMs(fd)` the length
+from the engine's decoders (APE, WavPack, TTA and DSD, which Android's
+`MediaMetadataRetriever` does not know).
 
 A per-instance lock makes "check the pre-load generation, then publish the
 decoder" atomic with `clearNext()` and `load()`, so a cancelled pre-load can

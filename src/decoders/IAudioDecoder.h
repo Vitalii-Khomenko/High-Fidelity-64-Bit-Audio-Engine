@@ -18,6 +18,14 @@ enum class Codec : int {
     Dsf = 4,
     Dff = 5,
     Aiff = 6,
+    Aac = 7,       // through MediaCodec
+    Alac = 8,      // through MediaCodec
+    Vorbis = 9,
+    Opus = 10,
+    WavPack = 11,
+    Ape = 12,
+    Tta = 13,
+    Other = 14,    // anything else MediaCodec decodes
 };
 
 /**

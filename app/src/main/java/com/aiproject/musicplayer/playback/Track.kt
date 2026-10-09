@@ -1,11 +1,19 @@
 package com.aiproject.musicplayer.playback
 
-/** A playable item. [uri] is a content://, file:// or http(s):// (DLNA) URI string. */
+/**
+ * A playable item. [uri] is a content://, file:// or http(s):// (DLNA) URI
+ * string; a CUE sheet track carries its range in the fragment (see [PlayableUri]).
+ */
 data class Track(
     val uri: String,
     val title: String,
     val folder: String = "",
     val durationMs: Long = 0L,
+    val artist: String = "",
+    val album: String = "",
+    /** Position on the album (tags or CUE sheet), 0 when unknown. */
+    val trackNumber: Int = 0,
+    val discNumber: Int = 0,
 )
 
 enum class RepeatMode(val id: Int) {
@@ -47,7 +55,9 @@ enum class ReplayGainMode(val id: Int) {
 }
 
 enum class SortMode(val id: Int) {
-    NAME(0), NUMBER(1);
+    NAME(0), NUMBER(1), ALBUM(2);
+
+    fun next(): SortMode = entries[(ordinal + 1) % entries.size]
 
     companion object {
         fun fromId(id: Int): SortMode = entries.firstOrNull { it.id == id } ?: NAME

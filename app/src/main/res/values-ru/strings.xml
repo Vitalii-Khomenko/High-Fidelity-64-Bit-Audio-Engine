@@ -41,6 +41,7 @@
     <string name="add">Добавить</string>
     <string name="sort_name">А–Я</string>
     <string name="sort_number">1–9</string>
+    <string name="sort_album">Альбом</string>
     <string name="save">Сохранить</string>
     <string name="clear">Очистить</string>
     <string name="remove">Убрать</string>

@@ -2,6 +2,7 @@ package com.aiproject.musicplayer
 
 import android.content.Context
 import android.net.Uri
+import com.aiproject.musicplayer.playback.PlayableUri
 import com.aiproject.musicplayer.playback.ReplayGainMode
 
 /** Format of the audible track as reported by the native engine. */
@@ -16,7 +17,12 @@ data class StreamFormat(
     val replayGainDb: Float,
     val underruns: Int,
 ) {
-    enum class Codec(val label: String) { UNKNOWN(""), FLAC("FLAC"), WAV("WAV"), MP3("MP3"), DSF("DSF"), DFF("DFF"), AIFF("AIFF") }
+    /** Same order as decoders::Codec in src/decoders/IAudioDecoder.h. */
+    enum class Codec(val label: String, val lossy: Boolean = false) {
+        UNKNOWN(""), FLAC("FLAC"), WAV("WAV"), MP3("MP3", true), DSF("DSF"), DFF("DFF"), AIFF("AIFF"),
+        AAC("AAC", true), ALAC("ALAC"), VORBIS("VORBIS", true), OPUS("OPUS", true), WAVPACK("WAVPACK"),
+        APE("APE"), TTA("TTA"), OTHER(""),
+    }
 }
 
 /**
@@ -41,16 +47,21 @@ class AudioEngine {
         nativeRelease(old)
     }
 
-    /** Opens [uri] (content:// or file://) and makes it current, paused at 0. */
+    /**
+     * Opens [uri] (content:// or file://, optionally a CUE range, see
+     * [PlayableUri]) and makes it current, paused at 0.
+     */
     fun load(context: Context, uri: Uri, replayGain: ReplayGainMode): Boolean {
-        val fd = openFd(context, uri) ?: return false
-        return nativeLoad(id, fd, replayGain.id)
+        val parts = PlayableUri.split(uri.toString())
+        val fd = openFd(context, Uri.parse(parts.fileUri)) ?: return false
+        return nativeLoad(id, fd, replayGain.id, parts.startUs, parts.endUs)
     }
 
     /** Queues [uri] for a gapless transition after the current track. */
     fun loadNext(context: Context, uri: Uri, replayGain: ReplayGainMode): Boolean {
-        val fd = openFd(context, uri) ?: return false
-        return nativeLoadNext(id, fd, replayGain.id)
+        val parts = PlayableUri.split(uri.toString())
+        val fd = openFd(context, Uri.parse(parts.fileUri)) ?: return false
+        return nativeLoadNext(id, fd, replayGain.id, parts.startUs, parts.endUs)
     }
 
     fun clearNext() = nativeClearNext(id)
@@ -99,8 +110,8 @@ class AudioEngine {
 
     private external fun nativeCreate(): Long
     private external fun nativeRelease(id: Long)
-    private external fun nativeLoad(id: Long, fd: Int, replayGainMode: Int): Boolean
-    private external fun nativeLoadNext(id: Long, fd: Int, replayGainMode: Int): Boolean
+    private external fun nativeLoad(id: Long, fd: Int, replayGainMode: Int, startUs: Long, endUs: Long): Boolean
+    private external fun nativeLoadNext(id: Long, fd: Int, replayGainMode: Int, startUs: Long, endUs: Long): Boolean
     private external fun nativeClearNext(id: Long)
     private external fun nativePlay(id: Long): Boolean
     private external fun nativePause(id: Long)

@@ -1,5 +1,6 @@
 package com.aiproject.musicplayer.library
 
+import com.aiproject.musicplayer.playback.PlayableUri
 import com.aiproject.musicplayer.playback.SortMode
 import com.aiproject.musicplayer.playback.Track
 import java.util.Locale
@@ -8,8 +9,19 @@ object PlaylistOrdering {
     private val numberRegex = Regex("\\d+")
     private val leadingNumericPrefixRegex = Regex("^(?:\\d+\\s*)+")
 
-    /** NAME: natural order ignoring leading track numbers. NUMBER: by the numbers in the name. */
+    /**
+     * NAME: natural order ignoring leading track numbers. NUMBER: by the numbers
+     * in the name. ALBUM: album by album, in track order (tags or CUE sheet),
+     * falling back to the file name order inside a folder.
+     */
     fun comparator(mode: SortMode): Comparator<Track> = when (mode) {
+        SortMode.ALBUM -> compareBy<Track> { naturalSortKey(it.album.ifBlank { it.folder }) }
+            .thenBy { it.folder.lowercase(Locale.ROOT) }
+            .thenBy { it.discNumber }
+            .thenBy { if (it.trackNumber > 0) it.trackNumber else Int.MAX_VALUE }
+            .thenBy { PlayableUri.split(it.uri).startUs }
+            .thenBy { numericSortKey(it.title) }
+            .thenBy { it.uri }
         SortMode.NAME -> compareBy<Track> { naturalSortKey(it.title) }
             .thenBy { it.folder.lowercase(Locale.ROOT) }
             .thenBy { it.uri }

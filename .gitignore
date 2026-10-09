@@ -14,3 +14,4 @@ app/build/
 signing/
 artifacts/
 .claude/settings.local.json
+tests/native/.cache/

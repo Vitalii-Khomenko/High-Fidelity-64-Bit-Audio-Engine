@@ -7,9 +7,12 @@ bash tests/native/run.sh          # AddressSanitizer + UndefinedBehaviorSanitize
 TSAN=1 bash tests/native/run.sh   # additionally ThreadSanitizer on the player scenarios
 ```
 
-Requires a C/C++17 compiler. With SoX, FLAC and LAME installed the script also
-generates real fixtures (16-bit WAV, 24-bit AIFF, FLAC with and without
-ReplayGain tags, MP3 CBR / VBR / VBR without Xing, a 10-minute MP3).
+Requires a C/C++17 compiler. The third-party decoders (Ogg, Vorbis, Opus,
+WavPack, Monkey's Audio, TTA) are built once without sanitizers and cached in
+`tests/native/.cache` (rebuilt when a source changes). With SoX, FLAC and LAME
+installed the script also generates real fixtures (16-bit WAV, 24-bit AIFF,
+FLAC with and without ReplayGain tags, MP3 CBR / VBR / VBR without Xing, a
+10-minute MP3, Ogg Vorbis with a comment).
 
 `decoder_tests.cpp`
 
@@ -25,6 +28,26 @@ ReplayGain tags, MP3 CBR / VBR / VBR without Xing, a 10-minute MP3).
   reopen, failed reopen; MP3 seek-table speed.
 - DSP: lock-free ring under concurrent flushes, Sonic speeds and resolution
   (quiet and over-full-scale tones), EQ response, downmix matrix.
+
+`format_tests.cpp`
+
+- WavPack, Monkey's Audio and TTA, 16 and 24 bit, stereo and mono 96 kHz,
+  encoded in the test with the same libraries: bit-exact decode, exact length,
+  sample-exact seeks (including to the very end), refusal of damaged files.
+- Ogg Opus written by the test (libopus + libogg, pre-skip and end trimming):
+  exact gapless length, level, aligned seeks that converge within 100 ms, tags
+  and R128 gain. Ogg Vorbis from SoX: length, level, exact seeks, comments.
+- MediaCodec path against a fake extractor / codec (`stubs/media`): float and
+  16-bit output, codec latency of 0–5 packets, encoder delay and padding
+  trimming, exact seeks, ALAC bit depth, a phone without a decoder.
+- CUE ranges: exact cut points, three ranges of one file join to the original
+  sample for sample, invalid ranges refused.
+- Container sniffing for every signature, with an ID3v2 tag in front.
+- Tags: FLAC (comments, front vs back cover), ID3v2.3 (UTF-16, Windows-1251
+  text labelled Latin-1, Latin-1, `USLT`, two `APIC`), ID3v2.4 (UTF-8, multiple
+  values, frame unsynchronisation, data length indicator), whole-tag
+  unsynchronisation, ID3v1 fallback, APEv2 with a binary cover, MP4 `ilst`
+  with freeform ReplayGain, WAV `LIST/INFO`, untagged files.
 
 `player_tests.cpp` runs `AudioPlayer` against a simulated Oboe stream
 (`stubs/oboe/Oboe.h`): playing to the end with drain, pause/resume without a
@@ -47,7 +70,8 @@ The stubs exist only on the test include path; Android builds use real Oboe.
 ```
 
 Queue and shuffle logic (`PlaybackQueueTest`), audio focus policy, supported
-formats and sorting, DLNA protocol (paging, containers, XML hardening), EQ
+formats and sorting (including album order), CUE sheets (timing, pregaps,
+one file per track, code pages) and range URIs, the native tag record, DLNA protocol (paging, containers, XML hardening), EQ
 settings, speed clamping, DSD labels, library folder serialisation.
 
 ## Instrumented tests
@@ -92,7 +116,8 @@ of the browse tree (`connectedDebugAndroidTest`). For the real head unit:
 Host tests cannot cover the audio HAL, Bluetooth or OEM power management.
 Before treating a build as stable, check:
 
-1. WAV, FLAC, MP3 (VBR without Xing), DSF and DFF; the first and last seconds of short tracks.
+1. WAV, FLAC, MP3 (VBR without Xing), DSF and DFF, WavPack, APE, TTA, Ogg Vorbis, Opus, M4A (AAC and ALAC), an HE-AAC stream; the first and last seconds of short tracks.
+1. A CUE album (FLAC + CUE, and APE + CUE whose sheet names a `.wav`): track list, gapless joins, seeking inside a track, the last track's length.
 2. Pause / resume (no repeated or missing audio), stop / play, quick track changes, seeking while playing and paused.
 3. Speeds 0.75 – 2.0× in both profiles, switching back to 1.00×, EQ changes during playback.
 4. Gapless albums, repeat one / all, shuffle; changing the queue seconds before a track ends.

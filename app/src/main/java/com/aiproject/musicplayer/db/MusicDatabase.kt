@@ -7,7 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [PlaylistTrackEntity::class, PlaylistEntity::class], version = 4, exportSchema = false)
+@Database(entities = [PlaylistTrackEntity::class, PlaylistEntity::class], version = 5, exportSchema = false)
 abstract class MusicDatabase : RoomDatabase() {
     abstract fun trackDao(): TrackDao
     abstract fun playlistDao(): PlaylistDao
@@ -58,6 +58,16 @@ abstract class MusicDatabase : RoomDatabase() {
             }
         }
 
+        /** 0.11: album fields for playlist tracks (CUE sheets, tags). */
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE playlist_tracks ADD COLUMN artist TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE playlist_tracks ADD COLUMN album TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE playlist_tracks ADD COLUMN trackNumber INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE playlist_tracks ADD COLUMN discNumber INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         @Volatile
         private var INSTANCE: MusicDatabase? = null
 
@@ -68,7 +78,7 @@ abstract class MusicDatabase : RoomDatabase() {
                     MusicDatabase::class.java,
                     "musicplayer_database"
                 )
-                .addMigrations(MIGRATION_3_4)
+                .addMigrations(MIGRATION_3_4, MIGRATION_4_5)
                 .build()
                 INSTANCE = instance
                 instance

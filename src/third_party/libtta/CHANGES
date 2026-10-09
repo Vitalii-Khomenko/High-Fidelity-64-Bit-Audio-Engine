@@ -1,0 +1,8 @@
+libtta-cpp 2.3 (https://sourceforge.net/projects/tta/files/tta/libtta%2B%2B/), LGPL-3.
+
+Changes made for HiFi Player (2026-10-09):
+- libtta.cpp: tta_malloc() uses posix_memalign() instead of aligned_alloc().
+  aligned_alloc() requires the size to be a multiple of the alignment (the seek
+  table of a short file is not) and is only available from Android API 28.
+- config.h: written by hand (no configure run); no assembly or SSE paths.
+- Build: compiled as its own shared library, libtta.so, so it can be replaced.

@@ -17,13 +17,13 @@ output stage, with a Kotlin / Jetpack Compose app on top.
 
 | | |
 |---|---|
-| **Formats** | FLAC, WAV / RF64 / W64, AIFF / AIFC, MP3 (CBR, VBR, with or without Xing), DSF and DSDIFF (DSD64 – DSD512) |
+| **Formats** | FLAC, WAV / RF64 / W64, AIFF / AIFC, MP3, DSF and DSDIFF (DSD64 – DSD512), WavPack, Monkey's Audio (APE), TTA, Ogg Vorbis, Ogg Opus — own decoders, lossless ones bit-exact. AAC / HE-AAC (M4A, M4B), ALAC and more through the phone's MediaCodec. CUE sheets (one file per album) play as separate, gapless tracks. |
 | **Precision** | Decoding, EQ, ReplayGain and the DSD decimator run in `double`. Integer PCM up to 32 bit and 64-bit float WAV enter the pipeline bit-exact. The device receives 32-bit float. |
 | **DSD** | Two-stage linear-phase FIR decimation to 88.2 / 96 kHz: flat to 24 kHz, aliases suppressed by 110 dB, unity gain. |
 | **Gapless** | The next track is pre-opened; same-format tracks join sample-exactly, a format change reopens the stream after the queue drains. |
 | **Transport** | Pause and resume stop and restart consumption at an exact frame — no re-seek, no lost samples. Volume and fades act after the buffer, so they are heard immediately. |
 | **Speed** | 0.75× – 2.0× with pitch preserved (Sonic, converted to float processing). At exactly 1.00× samples pass untouched. |
-| **Loudness** | ReplayGain (track / album) read from Vorbis comments and ID3v2 (MP3, WAV, AIFF, DSF) and limited by the tagged peak; EQ boosts lower the level automatically; a peak limiter guards the output. |
+| **Loudness** | ReplayGain (track / album) from Vorbis comments, Opus R128 gains, ID3v2, APEv2 and MP4 tags, limited by the tagged peak; EQ boosts lower the level automatically; a peak limiter guards the output. |
 | **Robustness** | Device switches (Bluetooth, USB, headphones) reopen the stream with the same format; unsupported multichannel layouts fold down to stereo; Oboe resamples when the device refuses a rate. |
 
 Measured by the native test suite (`tests/native`), on the host:
@@ -64,7 +64,7 @@ the side-by-side `audit` variant and toolchain notes are in
 ## Tests
 
 ```bash
-bash tests/native/run.sh                 # engine: ASan + UBSan, real WAV/AIFF/FLAC/MP3 fixtures
+bash tests/native/run.sh                 # engine: ASan + UBSan, real fixtures in every format
 TSAN=1 bash tests/native/run.sh          # plus ThreadSanitizer on the player scenarios
 ./gradlew testDebugUnitTest lintDebug    # JVM tests and Android lint
 ```
@@ -82,6 +82,7 @@ checklist for real devices.
 | [docs/BUILDING.md](docs/BUILDING.md) | Toolchain, variants, signing |
 | [docs/TESTING.md](docs/TESTING.md) | Automated tests and the device checklist |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Known limitations and next steps |
+| [docs/DIRECT_OUTPUT_PLAN.md](docs/DIRECT_OUTPUT_PLAN.md) | Plan for bit-perfect USB output past the Android mixer |
 | [CHANGELOG.md](CHANGELOG.md) | Release notes |
 | [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) | Bundled libraries and fonts |
 
@@ -89,7 +90,9 @@ checklist for real devices.
 
 Android mixes all apps in shared mode, so the system may resample and apply its
 own volume; this player does not claim bit-perfect output. DSD is converted to
-PCM (no DoP). See [docs/ROADMAP.md](docs/ROADMAP.md).
+PCM (no DoP). How real bit-perfect USB output is going to be built is in
+[docs/DIRECT_OUTPUT_PLAN.md](docs/DIRECT_OUTPUT_PLAN.md); other limits are in
+[docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## License
 

@@ -14,7 +14,7 @@ data class PlayerSettings(
     val eq: EqSettings = EqSettings(),
     val replayGain: ReplayGainMode = ReplayGainMode.TRACK,
     val repeat: RepeatMode = RepeatMode.OFF,
-    val sortMode: SortMode = SortMode.NAME,
+    val sortMode: SortMode = SortMode.ALBUM,
 )
 
 data class SavedQueue(
@@ -42,7 +42,7 @@ class PlayerStore(context: Context) {
         eq = EqSettings.deserialize(prefs.getBoolean(KEY_EQ_ENABLED, false), prefs.getString(KEY_EQ_GAINS, null)),
         replayGain = ReplayGainMode.fromId(prefs.getInt(KEY_REPLAY_GAIN, ReplayGainMode.TRACK.id)),
         repeat = RepeatMode.fromId(prefs.getInt(KEY_REPEAT, RepeatMode.OFF.id)),
-        sortMode = SortMode.fromId(prefs.getInt(KEY_SORT_MODE, SortMode.NAME.id)),
+        sortMode = SortMode.fromId(prefs.getInt(KEY_SORT_MODE, SortMode.ALBUM.id)),
     )
 
     fun saveSettings(s: PlayerSettings) {
@@ -143,7 +143,12 @@ class PlayerStore(context: Context) {
 
         fun encodeTracks(tracks: List<Track>): String = JSONArray().apply {
             tracks.forEach { t ->
-                put(JSONObject().put("uri", t.uri).put("name", t.title).put("folder", t.folder).put("durationMs", t.durationMs))
+                val o = JSONObject().put("uri", t.uri).put("name", t.title).put("folder", t.folder).put("durationMs", t.durationMs)
+                if (t.artist.isNotEmpty()) o.put("artist", t.artist)
+                if (t.album.isNotEmpty()) o.put("album", t.album)
+                if (t.trackNumber > 0) o.put("track", t.trackNumber)
+                if (t.discNumber > 0) o.put("disc", t.discNumber)
+                put(o)
             }
         }.toString()
 
@@ -154,7 +159,11 @@ class PlayerStore(context: Context) {
                 (0 until array.length()).mapNotNull { i ->
                     val o = array.optJSONObject(i) ?: return@mapNotNull null
                     val uri = o.optString("uri").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                    Track(uri, o.optString("name", uri), o.optString("folder", ""), o.optLong("durationMs", 0L))
+                    Track(
+                        uri, o.optString("name", uri), o.optString("folder", ""), o.optLong("durationMs", 0L),
+                        artist = o.optString("artist", ""), album = o.optString("album", ""),
+                        trackNumber = o.optInt("track", 0), discNumber = o.optInt("disc", 0),
+                    )
                 }
             } catch (_: Exception) {
                 emptyList()

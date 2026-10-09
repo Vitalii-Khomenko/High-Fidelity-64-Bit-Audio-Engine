@@ -1,5 +1,6 @@
 ﻿package com.aiproject.musicplayer.db
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -35,4 +36,8 @@ data class PlaylistTrackEntity(
     val folder: String = "",
     val durationMs: Long = 0L,
     val playOrder: Int = 0,
+    @ColumnInfo(defaultValue = "") val artist: String = "",
+    @ColumnInfo(defaultValue = "") val album: String = "",
+    @ColumnInfo(defaultValue = "0") val trackNumber: Int = 0,
+    @ColumnInfo(defaultValue = "0") val discNumber: Int = 0,
 )

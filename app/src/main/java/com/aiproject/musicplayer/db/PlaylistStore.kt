@@ -19,6 +19,7 @@ class PlaylistStore(private val db: MusicDatabase) {
                     PlaylistTrackEntity(
                         playlistId = id.toInt(), uriString = t.uri, title = t.title,
                         folder = t.folder, durationMs = t.durationMs, playOrder = order,
+                        artist = t.artist, album = t.album, trackNumber = t.trackNumber, discNumber = t.discNumber,
                     ),
                 )
             }
@@ -28,7 +29,7 @@ class PlaylistStore(private val db: MusicDatabase) {
 
     suspend fun tracks(playlistId: Int): List<Track> = withContext(Dispatchers.IO) {
         db.trackDao().getTracksForPlaylist(playlistId).first().map {
-            Track(it.uriString, it.title, it.folder, it.durationMs)
+            Track(it.uriString, it.title, it.folder, it.durationMs, it.artist, it.album, it.trackNumber, it.discNumber)
         }
     }
 

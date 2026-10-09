@@ -1,19 +1,20 @@
 #include <jni.h>
 
 #include <atomic>
+#include <cstdio>
 #include <cmath>
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <unistd.h>
 
 #include "../core/AudioPlayer.h"
-#include "../decoders/DsdDecoder.h"
-#include "../decoders/FlacDecoder.h"
-#include "../decoders/Mp3Decoder.h"
+#include "../decoders/DecoderFactory.h"
+#include "../decoders/RangeDecoder.h"
 #include "../decoders/ReplayGainScanner.h"
-#include "../decoders/WavDecoder.h"
+#include "../tags/TagReader.h"
 
 using audio_engine::core::AudioPlayer;
 using audio_engine::core::TrackInfo;
@@ -62,42 +63,9 @@ struct OwnedFd {
     ~OwnedFd() { if (fd >= 0) ::close(fd); }
 };
 
-enum class Sniffed { Flac, Riff, Dsd, Mp3, Unknown };
-
-Sniffed sniff(int fd) {
-    uint8_t h[12] = {};
-    const ssize_t n = ::pread(fd, h, sizeof(h), 0);
-    if (n < 4) return Sniffed::Unknown;
-    if (!std::memcmp(h, "fLaC", 4) || !std::memcmp(h, "OggS", 4)) return Sniffed::Flac;
-    if (!std::memcmp(h, "RIFF", 4) || !std::memcmp(h, "RF64", 4) || !std::memcmp(h, "riff", 4) ||
-        !std::memcmp(h, "FORM", 4) || !std::memcmp(h, "RIFX", 4)) return Sniffed::Riff;
-    if (!std::memcmp(h, "DSD ", 4) || !std::memcmp(h, "FRM8", 4)) return Sniffed::Dsd;
-    if (!std::memcmp(h, "ID3", 3) || (h[0] == 0xFF && (h[1] & 0xE0) == 0xE0)) return Sniffed::Mp3;
-    return Sniffed::Unknown;
-}
-
-std::unique_ptr<dec::IAudioDecoder> makeDecoder(Sniffed kind) {
-    switch (kind) {
-        case Sniffed::Flac: return std::make_unique<dec::FlacDecoder>();
-        case Sniffed::Riff: return std::make_unique<dec::WavDecoder>();
-        case Sniffed::Dsd: return std::make_unique<dec::DsdDecoder>();
-        case Sniffed::Mp3: return std::make_unique<dec::Mp3Decoder>();
-        default: return nullptr;
-    }
-}
-
-std::unique_ptr<dec::IAudioDecoder> openDecoder(int fd) {
-    const Sniffed kind = sniff(fd);
-    if (auto decoder = makeDecoder(kind)) {
-        if (decoder->openFd(fd)) return decoder;
-        return nullptr;
-    }
-    // No recognisable signature (e.g. MP3 behind junk bytes): try permissive decoders.
-    for (Sniffed fallback : {Sniffed::Flac, Sniffed::Riff, Sniffed::Mp3}) {
-        auto decoder = makeDecoder(fallback);
-        if (decoder && decoder->openFd(fd)) return decoder;
-    }
-    return nullptr;
+/** Opens fd with the right decoder; a CUE track becomes a range of the file. */
+std::unique_ptr<dec::IAudioDecoder> openDecoder(int fd, jlong startUs, jlong endUs) {
+    return dec::RangeDecoder::wrap(dec::openDecoder(fd), startUs, endUs);
 }
 
 double gainFor(int fd, jint replayGainMode) {
@@ -135,12 +103,13 @@ Java_com_aiproject_musicplayer_AudioEngine_nativeRelease(JNIEnv*, jobject, jlong
 
 /** Takes ownership of fd. */
 JNIEXPORT jboolean JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeLoad(JNIEnv*, jobject, jlong id, jint fd, jint replayGainMode) {
+Java_com_aiproject_musicplayer_AudioEngine_nativeLoad(JNIEnv*, jobject, jlong id, jint fd, jint replayGainMode,
+                                                      jlong startUs, jlong endUs) {
     OwnedFd owned{fd};
     auto inst = instance(id);
     if (fd < 0 || !inst) return JNI_FALSE;
     inst->invalidateNext();  // any pre-load still being opened is stale now
-    auto decoder = openDecoder(fd);
+    auto decoder = openDecoder(fd, startUs, endUs);
     if (!decoder) return JNI_FALSE;
     const double gain = gainFor(fd, replayGainMode);
     return inst->player->load(std::move(decoder), gain) ? JNI_TRUE : JNI_FALSE;
@@ -148,12 +117,13 @@ Java_com_aiproject_musicplayer_AudioEngine_nativeLoad(JNIEnv*, jobject, jlong id
 
 /** Takes ownership of fd. Ignored if load()/clearNext() happened meanwhile. */
 JNIEXPORT jboolean JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeLoadNext(JNIEnv*, jobject, jlong id, jint fd, jint replayGainMode) {
+Java_com_aiproject_musicplayer_AudioEngine_nativeLoadNext(JNIEnv*, jobject, jlong id, jint fd, jint replayGainMode,
+                                                          jlong startUs, jlong endUs) {
     OwnedFd owned{fd};
     auto inst = instance(id);
     if (fd < 0 || !inst) return JNI_FALSE;
     const uint64_t generation = inst->generation();
-    auto decoder = openDecoder(fd);
+    auto decoder = openDecoder(fd, startUs, endUs);
     if (!decoder) return JNI_FALSE;
     const double gain = gainFor(fd, replayGainMode);
     {
@@ -276,6 +246,61 @@ Java_com_aiproject_musicplayer_AudioEngine_nativeGetSpectrum(JNIEnv* env, jobjec
     float bands[audio_engine::dsp::SpectrumAnalyzer::kMaxBands] = {};
     if (auto p = player(id)) p->spectrum(bands, static_cast<int>(count));
     env->SetFloatArrayRegion(out, 0, count, bands);
+}
+
+// ── Tags (stateless; the caller keeps ownership of fd) ──────────────────────
+
+/**
+ * UTF-8 fields separated by NUL: title, artist, album, album artist, genre,
+ * year, lyrics, track, track total, disc, disc total, has picture (0/1),
+ * track gain dB, album gain dB (empty when absent). Strings go through a byte
+ * array because NewStringUTF() cannot take 4-byte UTF-8 sequences.
+ */
+JNIEXPORT jbyteArray JNICALL
+Java_com_aiproject_musicplayer_NativeTags_readTags(JNIEnv* env, jclass, jint fd) {
+    if (fd < 0) return nullptr;
+    const auto t = audio_engine::tags::readTags(fd, false);
+    auto number = [](int v) { return v > 0 ? std::to_string(v) : std::string(); };
+    auto gain = [](bool has, float db) {
+        if (!has) return std::string();
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.2f", db);
+        return std::string(buf);
+    };
+    const std::string fields[] = {
+        t.title, t.artist, t.album, t.albumArtist, t.genre, t.year, t.lyrics,
+        number(t.track), number(t.trackTotal), number(t.disc), number(t.discTotal), t.hasPicture ? "1" : "0",
+        gain(t.replayGain.hasTrack, t.replayGain.trackGainDb), gain(t.replayGain.hasAlbum, t.replayGain.albumGainDb),
+    };
+    std::string joined;
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
+        if (i) joined.push_back('\0');
+        joined += fields[i];
+    }
+    jbyteArray out = env->NewByteArray(static_cast<jsize>(joined.size()));
+    if (out) env->SetByteArrayRegion(out, 0, static_cast<jsize>(joined.size()), reinterpret_cast<const jbyte*>(joined.data()));
+    return out;
+}
+
+/** The embedded cover (front cover preferred), or null. */
+JNIEXPORT jbyteArray JNICALL
+Java_com_aiproject_musicplayer_NativeTags_readPicture(JNIEnv* env, jclass, jint fd) {
+    if (fd < 0) return nullptr;
+    const auto t = audio_engine::tags::readTags(fd, true);
+    const auto& data = t.picture.data;
+    if (data.empty() || data.size() > 0x7fffffff) return nullptr;
+    jbyteArray out = env->NewByteArray(static_cast<jsize>(data.size()));
+    if (out) env->SetByteArrayRegion(out, 0, static_cast<jsize>(data.size()), reinterpret_cast<const jbyte*>(data.data()));
+    return out;
+}
+
+/** Duration in ms from the engine's own decoders, 0 when the file cannot be opened. */
+JNIEXPORT jlong JNICALL
+Java_com_aiproject_musicplayer_NativeTags_probeDurationMs(JNIEnv*, jclass, jint fd) {
+    if (fd < 0) return 0;
+    auto decoder = dec::openDecoder(fd);
+    if (!decoder || decoder->getSampleRate() == 0) return 0;
+    return static_cast<jlong>(decoder->getTotalFrames() * 1000ull / decoder->getSampleRate());
 }
 
 } // extern "C"

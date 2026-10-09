@@ -24,7 +24,8 @@ the Android app.
 |---|---|
 | `com.aiproject.musicplayer` | `MainActivity`, `AudioEngine` (JNI names depend on this location) |
 | `…playback` | `PlaybackService`, `PlaybackQueue`, `PlayerStore`, `AudioFocusPolicy`, models (`Track`, modes), `FormatText`, `OutputDevice` |
-| `…library` | SAF folder scanning and browsing, MediaStore scan, DLNA discovery / protocol / download cache, sorting, supported formats |
+| `…library` | SAF folder scanning and browsing (CUE sheets expanded into tracks, `CueSheet.kt`), MediaStore scan, DLNA discovery / protocol / download cache, sorting, supported formats |
+| `…playback` (`PlayableUri`) | A CUE track's URI is the audio file's URI plus `#hifi-cue=<startUs>-<endUs>`; `AudioEngine` splits it and passes the range to the engine |
 | `…db` | Room database for saved playlists |
 | `…ui` | Compose screens (Player, Library, Sound, Settings), theme and components |
 

@@ -16,7 +16,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import com.aiproject.musicplayer.NativeTags
 import com.aiproject.musicplayer.R
+import com.aiproject.musicplayer.playback.PlayableUri
 import com.aiproject.musicplayer.playback.PlayerCommands
 import com.aiproject.musicplayer.playback.Track
 import com.aiproject.musicplayer.ui.theme.Aw
@@ -104,14 +106,30 @@ fun DurationProbe(tracks: List<Track>, commands: PlayerCommands) {
     }
 }
 
-private fun probe(context: android.content.Context, uri: String): Long? = try {
+/** Duration of a track; a CUE track without an end runs from its start to the end of the file. */
+private fun probe(context: android.content.Context, uri: String): Long? {
+    val parts = PlayableUri.split(uri)
+    if (parts.durationMs > 0) return parts.durationMs
+    val file = Uri.parse(parts.fileUri)
+    val full = retrieverDuration(context, file) ?: nativeDuration(context, file) ?: return null
+    return (full - parts.startUs / 1000L).takeIf { it > 0 }
+}
+
+private fun retrieverDuration(context: android.content.Context, uri: Uri): Long? = try {
     val retriever = MediaMetadataRetriever()
     try {
-        retriever.setDataSource(context, Uri.parse(uri))
+        retriever.setDataSource(context, uri)
         retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.takeIf { it > 0 }
     } finally {
         retriever.release()
     }
+} catch (_: Exception) {
+    null
+}
+
+/** APE, WavPack, TTA, DSD: formats the system retriever does not know. */
+private fun nativeDuration(context: android.content.Context, uri: Uri): Long? = try {
+    context.contentResolver.openFileDescriptor(uri, "r")?.use { NativeTags.durationMs(it.fd) }?.takeIf { it > 0 }
 } catch (_: Exception) {
     null
 }

@@ -40,20 +40,20 @@ class DlnaBrowsePageTest {
         DlnaProtocol.parseBrowsePage(envelope(item(*res), 1, 1)).tracks.singleOrNull()?.url
 
     @Test fun `a playable resource is preferred over an earlier unsupported one`() {
-        assertEquals("http://h/song.mp3", chosen("http://h/song.aac" to "audio/aac", "http://h/song.mp3" to "audio/mpeg"))
+        assertEquals("http://h/song.mp3", chosen("http://h/song.wma" to "audio/x-ms-wma", "http://h/song.mp3" to "audio/mpeg"))
         assertEquals("http://h/a.mp3", chosen("http://h/a.mp3" to "audio/mpeg", "http://h/a.flac" to "audio/flac"))
     }
 
     @Test fun `without an extension the protocolInfo mime decides`() {
-        assertEquals("http://h/stream/2", chosen("http://h/stream/1" to "audio/aac", "http://h/stream/2" to "audio/flac"))
+        assertEquals("http://h/stream/2", chosen("http://h/stream/1" to "audio/x-ms-wma", "http://h/stream/2" to "audio/flac"))
     }
 
     @Test fun `items with only unsupported resources are skipped`() {
-        assertEquals(null, chosen("http://h/a.aac" to "audio/aac", "http://h/a.wma" to "audio/x-ms-wma"))
+        assertEquals(null, chosen("http://h/a.ra" to "audio/vnd.rn-realaudio", "http://h/a.wma" to "audio/x-ms-wma"))
     }
 
     @Test fun `an unknown resource is a last resort`() {
-        assertEquals("http://h/media?id=7", chosen("http://h/a.ogg" to "audio/ogg", "http://h/media?id=7" to null))
+        assertEquals("http://h/media?id=7", chosen("http://h/a.mid" to "audio/midi", "http://h/media?id=7" to null))
     }
 
     @Test fun `browse envelope carries paging`() {

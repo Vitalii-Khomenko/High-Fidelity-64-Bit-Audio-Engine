@@ -1093,12 +1093,14 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
     private fun updateSessionMetadata() {
         if (!::session.isInitialized) return
         val track = queue.current
+        val artist = track?.artist?.ifBlank { null } ?: track?.folder.orEmpty()
         session.setMetadata(
             MediaMetadataCompat.Builder()
                 .putString(MediaMetadataCompat.METADATA_KEY_TITLE, track?.title.orEmpty())
-                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, track?.folder.orEmpty())
+                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
+                .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, track?.album.orEmpty())
                 .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, track?.title.orEmpty())
-                .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, track?.folder.orEmpty())
+                .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, artist)
                 .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, _position.value.durationMs.coerceAtLeast(track?.durationMs ?: 0L))
                 .build(),
         )

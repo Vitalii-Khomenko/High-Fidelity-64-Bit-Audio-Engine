@@ -120,10 +120,15 @@ fun PlayerScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     AwButton(stringResource(R.string.add), onOpenLibrary, Modifier.weight(1f))
-                    val nextSort = if (state.settings.sortMode == SortMode.NAME) SortMode.NUMBER else SortMode.NAME
                     AwButton(
-                        stringResource(if (state.settings.sortMode == SortMode.NAME) R.string.sort_name else R.string.sort_number),
-                        { commands.sortQueue(nextSort) }, Modifier.weight(1f),
+                        stringResource(
+                            when (state.settings.sortMode) {
+                                SortMode.NAME -> R.string.sort_name
+                                SortMode.NUMBER -> R.string.sort_number
+                                SortMode.ALBUM -> R.string.sort_album
+                            },
+                        ),
+                        { commands.sortQueue(state.settings.sortMode.next()) }, Modifier.weight(1f),
                     )
                     AwButton(stringResource(R.string.save), { askSave = true }, Modifier.weight(1f))
                     AwButton(stringResource(R.string.clear), { askClear = true }, Modifier.weight(1f))

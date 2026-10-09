@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.11.0 — 2026-10-09
+
+### Formats
+
+- New own decoders: **WavPack** (libwavpack 5.7), **Monkey's Audio / APE** (official SDK 13.27), **TTA** (libtta++ 2.3, as the separate LGPL library `libtta.so`), **Ogg Vorbis** (libvorbis 1.3.7) and **Ogg Opus** (libopus 1.5.2 + opusfile 0.12). Lossless formats decode bit-exact; all seeks are sample-exact (Opus: sample-aligned, the decoder converges within 100 ms).
+- **AAC / HE-AAC (M4A, M4B, MP4, ADTS), ALAC** and anything else the phone decodes, through `MediaExtractor` + `MediaCodec`: float output where the codec offers it, encoder delay and padding trimmed (gapless AAC albums), HE-AAC / parametric stereo handled, sample-exact seeks.
+- **CUE sheets**: a folder with `album.cue` + `album.flac` (or `.ape`, `.wv`, …) shows the sheet's tracks instead of the big file. Tracks of one file join without a gap; the pregap stays with the previous track. UTF-8, Windows-1251 and Windows-1252 sheets are detected; a sheet that says `.wav` finds the `.flac` next to it.
+- Container detection skips an ID3v2 tag in front of any format and tells Ogg Opus / Vorbis / FLAC apart; multichannel Vorbis and Opus are reordered to the WAVE channel order.
+
+### Tags
+
+- One native tag reader for everything: Vorbis comments (FLAC, Ogg), ID3v2.2–2.4 (with unsynchronisation, data length indicators, UTF-16 BOM quirks), ID3v1, APEv2, MP4 `ilst` (incl. freeform items), WAV `LIST/INFO`, covers (FLAC `PICTURE`, `APIC`, `covr`, APE binary items, `METADATA_BLOCK_PICTURE`). Cyrillic text stored as "Latin-1" by Windows tools is shown correctly.
+- ReplayGain now also from Opus R128 gains, APEv2 and MP4 tags.
+- The media session (lock screen, car, Bluetooth) shows artist and album when known.
+
+### App
+
+- New queue order **Album** (album, disc, track number, then file name; CUE tracks in sheet order), the default for new installs. The sort button cycles A–Z → 1–9 → Album.
+- Track durations for APE, WavPack, TTA and DSD come from the engine when Android's metadata reader does not know the format.
+- Playlists keep artist, album and track numbers (database version 5, migrated in place).
+
+### Docs
+
+- New [docs/DIRECT_OUTPUT_PLAN.md](docs/DIRECT_OUTPUT_PLAN.md): where the audio goes today (the Android mixer, since the first version), and the plan for bit-perfect USB output.
+- Engine, testing, third-party notices updated.
+
 ## 0.10.0 — 2026-10-09
 
 ### Android Auto
