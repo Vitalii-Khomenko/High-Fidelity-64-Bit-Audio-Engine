@@ -127,6 +127,27 @@ no tags.
 index, else from the file) in the background; in *Books* mode titles keep the
 file names.
 
+## DLNA
+
+**Client.** `DlnaDiscovery` finds media servers (SSDP) and browses them
+(ContentDirectory, paged, size-limited). `DlnaPlaybackCache` downloads tracks
+into the cache; one download per URL is shared by playback and the gapless
+pre-load, and downloads that are neither the current nor the next track are
+cancelled. For FLAC, WAV / AIFF, WavPack and TTA with a known length the
+download registers a native stream (`NativeStreams`) and playback starts after
+512 KiB; the engine waits for later bytes (see AUDIO_ENGINE.md).
+
+**Renderer** (`dlna/`, optional, off by default). `RendererServer` serves a
+UPnP MediaRenderer:1 on the Wi-Fi address: device and service descriptions,
+SOAP control (`RendererControl`: AVTransport incl. `SetNextAVTransportURI`,
+RenderingControl volume / mute, ConnectionManager protocol info), GENA
+subscriptions with `LastChange` events, and SSDP answers and announcements.
+Only clients on the local network are served and only http(s) URLs are
+accepted. The service implements the host: a new URI replaces the queue, a
+next URI becomes the queue's next track (gapless), *Stop* stops without
+shutting the service down, volume is the engine volume. It runs while the
+service exists (app open or playing).
+
 ## Persistence
 
 | Where | What |

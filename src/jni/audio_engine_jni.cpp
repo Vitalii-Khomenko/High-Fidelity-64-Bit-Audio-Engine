@@ -65,9 +65,21 @@ struct OwnedFd {
     ~OwnedFd() { if (fd >= 0) ::close(fd); }
 };
 
+// Downloads in progress (DLNA streaming), registered by the app.
+std::mutex g_streamsMutex;
+std::unordered_map<jlong, std::shared_ptr<dec::StreamState>> g_streams;
+jlong g_lastStream = 0;
+
+std::shared_ptr<dec::StreamState> stream(jlong id) {
+    if (id <= 0) return nullptr;
+    std::lock_guard<std::mutex> lock(g_streamsMutex);
+    const auto it = g_streams.find(id);
+    return it == g_streams.end() ? nullptr : it->second;
+}
+
 /** Opens fd with the right decoder; a CUE track becomes a range of the file. */
-std::unique_ptr<dec::IAudioDecoder> openDecoder(int fd, jlong startUs, jlong endUs) {
-    return dec::RangeDecoder::wrap(dec::openDecoder(fd), startUs, endUs);
+std::unique_ptr<dec::IAudioDecoder> openDecoder(int fd, jlong startUs, jlong endUs, jlong streamId = 0) {
+    return dec::RangeDecoder::wrap(dec::openDecoder(fd, stream(streamId)), startUs, endUs);
 }
 
 /**
@@ -131,13 +143,13 @@ Java_com_aiproject_musicplayer_AudioEngine_nativeRelease(JNIEnv*, jobject, jlong
 /** Takes ownership of fd. */
 JNIEXPORT jboolean JNICALL
 Java_com_aiproject_musicplayer_AudioEngine_nativeLoad(JNIEnv* env, jobject, jlong id, jint fd, jint replayGainMode,
-                                                      jlong startUs, jlong endUs, jdoubleArray fallbackGain) {
+                                                      jlong startUs, jlong endUs, jdoubleArray fallbackGain, jlong streamId) {
     const Fallback fallback(env, fallbackGain);
     OwnedFd owned{fd};
     auto inst = instance(id);
     if (fd < 0 || !inst) return JNI_FALSE;
     inst->invalidateNext();  // any pre-load still being opened is stale now
-    auto decoder = openDecoder(fd, startUs, endUs);
+    auto decoder = openDecoder(fd, startUs, endUs, streamId);
     if (!decoder) return JNI_FALSE;
     const double gain = gainFor(fd, replayGainMode, fallback.v);
     return inst->player->load(std::move(decoder), gain) ? JNI_TRUE : JNI_FALSE;
@@ -146,13 +158,13 @@ Java_com_aiproject_musicplayer_AudioEngine_nativeLoad(JNIEnv* env, jobject, jlon
 /** Takes ownership of fd. Ignored if load()/clearNext() happened meanwhile. */
 JNIEXPORT jboolean JNICALL
 Java_com_aiproject_musicplayer_AudioEngine_nativeLoadNext(JNIEnv* env, jobject, jlong id, jint fd, jint replayGainMode,
-                                                          jlong startUs, jlong endUs, jdoubleArray fallbackGain) {
+                                                          jlong startUs, jlong endUs, jdoubleArray fallbackGain, jlong streamId) {
     const Fallback fallback(env, fallbackGain);
     OwnedFd owned{fd};
     auto inst = instance(id);
     if (fd < 0 || !inst) return JNI_FALSE;
     const uint64_t generation = inst->generation();
-    auto decoder = openDecoder(fd, startUs, endUs);
+    auto decoder = openDecoder(fd, startUs, endUs, streamId);
     if (!decoder) return JNI_FALSE;
     const double gain = gainFor(fd, replayGainMode, fallback.v);
     {
@@ -292,6 +304,34 @@ Java_com_aiproject_musicplayer_AudioEngine_nativeGetSpectrum(JNIEnv* env, jobjec
     float bands[audio_engine::dsp::SpectrumAnalyzer::kMaxBands] = {};
     if (auto p = player(id)) p->spectrum(bands, static_cast<int>(count));
     env->SetFloatArrayRegion(out, 0, count, bands);
+}
+
+// ── Streams: files still being downloaded ───────────────────────────────────
+
+JNIEXPORT jlong JNICALL
+Java_com_aiproject_musicplayer_NativeStreams_create(JNIEnv*, jclass, jlong totalBytes) {
+    auto state = std::make_shared<dec::StreamState>();
+    state->total.store(totalBytes > 0 ? static_cast<uint64_t>(totalBytes) : 0);
+    std::lock_guard<std::mutex> lock(g_streamsMutex);
+    const jlong id = ++g_lastStream;
+    g_streams.emplace(id, std::move(state));
+    return id;
+}
+
+/** status: 0 downloading, 1 complete, 2 failed. */
+JNIEXPORT void JNICALL
+Java_com_aiproject_musicplayer_NativeStreams_progress(JNIEnv*, jclass, jlong id, jlong availableBytes, jint status) {
+    if (auto s = stream(id)) {
+        s->available.store(availableBytes > 0 ? static_cast<uint64_t>(availableBytes) : 0, std::memory_order_release);
+        s->status.store(status, std::memory_order_release);
+    }
+}
+
+/** Forgets a stream; decoders that still read it keep their own reference. */
+JNIEXPORT void JNICALL
+Java_com_aiproject_musicplayer_NativeStreams_release(JNIEnv*, jclass, jlong id) {
+    std::lock_guard<std::mutex> lock(g_streamsMutex);
+    g_streams.erase(id);
 }
 
 // ── Tags (stateless; the caller keeps ownership of fd) ──────────────────────

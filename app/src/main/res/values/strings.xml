@@ -170,4 +170,10 @@
     <string name="analyzing">Measuring %1$d / %2$d</string>
     <string name="limiter">True-peak limiter</string>
     <string name="limiter_hint">Keeps inter-sample peaks under −1 dBTP after gain and EQ. Below that the signal passes bit-exact.</string>
+    <!-- DLNA renderer -->
+    <string name="renderer">Play to this phone (DLNA)</string>
+    <string name="renderer_hint">Other devices on the same Wi-Fi (BubbleUPnP, foobar2000, Windows "Cast to device", Kodi…) see this phone as a player and can send music to it. Works while the app is open or playing.</string>
+    <string name="renderer_visible">Visible as %1$s</string>
+    <string name="renderer_no_network">No Wi-Fi network: the renderer could not start</string>
+    <string name="renderer_folder">DLNA</string>
 </resources>

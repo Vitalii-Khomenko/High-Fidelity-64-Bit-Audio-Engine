@@ -120,7 +120,18 @@ fun SettingsScreen(
         Text(stringResource(R.string.signal_path_hint), style = Aw.small, color = aw.muted)
 
         Spacer(Modifier.height(24.dp))
-        SectionHeader("05", stringResource(R.string.about), aw.paper)
+        SectionHeader("05", stringResource(R.string.renderer), aw.cyan)
+        Segmented(
+            listOf(false, true), state.settings.renderer,
+            label = { stringResource(if (it) R.string.on else R.string.off) },
+            onSelect = commands::setRenderer, tone = aw.cyan,
+        )
+        Spacer(Modifier.height(6.dp))
+        state.rendererName?.let { Text(stringResource(R.string.renderer_visible, it), style = Aw.small, color = aw.cyan) }
+        Text(stringResource(R.string.renderer_hint), style = Aw.small, color = aw.muted)
+
+        Spacer(Modifier.height(24.dp))
+        SectionHeader("06", stringResource(R.string.about), aw.paper)
         InfoLine(stringResource(R.string.version), BuildConfig.VERSION_NAME)
         Text(stringResource(R.string.about_text), style = Aw.small, color = aw.text)
         Spacer(Modifier.height(10.dp))

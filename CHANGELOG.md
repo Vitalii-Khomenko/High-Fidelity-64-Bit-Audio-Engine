@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.14.0 — 2026-10-09
+
+### DLNA
+
+- **Streaming**: FLAC, WAV / AIFF, WavPack and TTA from a media server start playing after 512 KiB while the rest downloads. The engine waits for bytes that have not arrived; a pause or seek during a stall is handled without losing or repeating audio, and a broken download ends the track instead of hanging. One download per URL is shared by playback and the gapless pre-load; downloads that are no longer needed are cancelled.
+- **Renderer** (Settings → *Play to this phone*): the phone appears on the Wi-Fi as a UPnP / DLNA MediaRenderer. Control points (BubbleUPnP, foobar2000, Windows "Cast to device", Kodi…) can send music to it, with gapless next track (`SetNextAVTransportURI`), play / pause / stop / seek / next / previous, volume and mute, and state events (GENA `LastChange`). Local network only, http(s) URLs only, off by default.
+
 ## 0.13.0 — 2026-10-09
 
 ### Sound

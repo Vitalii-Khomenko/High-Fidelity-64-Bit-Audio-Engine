@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "AudioBuffer.h"
+#include "../decoders/FileSource.h"
 #include "../decoders/IAudioDecoder.h"
 #include "../dsp/ChannelMixer.h"
 #include "../dsp/Crossfeed.h"
@@ -85,6 +86,7 @@ public:
     /** Replaces the current track. Leaves the player paused at frame 0. */
     bool load(std::unique_ptr<decoders::IAudioDecoder> decoder, double gainLinear) {
         if (!isUsable(decoder.get())) return false;
+        watchIo(*decoder);
         std::lock_guard<std::mutex> lock(m_control);
         stopDecodeThread();
         if (m_output->isRunRequested()) m_output->stop(kSwitchFadeMs);
@@ -106,6 +108,7 @@ public:
             return false;
         }
         m_decoder = std::move(decoder);
+        m_resync = false;
         m_loaded.store(true, std::memory_order_release);
         m_gainLinear = gainLinear;
         prepareDsp(info.sampleRate, info.channels);
@@ -125,6 +128,7 @@ public:
     /** Queues the next track for a gapless (or near-gapless) transition. */
     void setNext(std::unique_ptr<decoders::IAudioDecoder> decoder, double gainLinear) {
         if (!isUsable(decoder.get())) return;
+        watchIo(*decoder);
         std::lock_guard<std::mutex> lock(m_nextMutex);
         m_next = std::move(decoder);
         m_nextGain = gainLinear;
@@ -346,6 +350,11 @@ private:
         TrackInfo info;
     };
 
+    /** A read waiting for a download gives up while the decode thread is being stopped. */
+    void watchIo(decoders::IAudioDecoder& d) {
+        if (auto* source = d.fileSource()) source->setAbortFlag(&m_abortIo);
+    }
+
     static bool isUsable(const decoders::IAudioDecoder* d) {
         return d && d->getSampleRate() > 0 && d->getNumChannels() > 0 && d->getNumChannels() <= 8;
     }
@@ -536,6 +545,7 @@ private:
     void seekLocked(int64_t frame, const TrackInfo* info = nullptr) {
         if (!m_decoder) return;
         m_prevDecoder.reset();
+        m_resync = false;   // a seek re-syncs the decoder anyway
         m_decoder->seekToFrame(static_cast<uint64_t>(std::max<int64_t>(frame, 0)));
         m_output->flush();
         m_pendingFrames = 0;
@@ -565,8 +575,12 @@ private:
 
     void stopDecodeThread() {
         m_stopThread.store(true, std::memory_order_release);
+        m_abortIo.store(true, std::memory_order_release);
         if (m_thread.joinable()) m_thread.join();
+        m_abortIo.store(false, std::memory_order_release);
         m_threadRunning.store(false, std::memory_order_release);
+        // A read cut short leaves the decoder mid-frame: restart it at the audible frame.
+        if (m_decoder && m_decoder->fileSource() && m_decoder->fileSource()->consumeInterrupted()) m_resync = true;
     }
 
     bool stopRequested() const { return m_stopThread.load(std::memory_order_acquire); }
@@ -574,6 +588,10 @@ private:
     void decodeLoop() {
         // Above normal priority; ignored where not permitted.
         setpriority(PRIO_PROCESS, static_cast<id_t>(gettid()), -16);
+        if (m_resync) {
+            m_resync = false;
+            seekAudible(static_cast<int64_t>(audibleSourceFrame()));
+        }
         while (!stopRequested()) {
             applyEq();
             applyOutputDsp();
@@ -860,6 +878,8 @@ private:
     std::atomic<uint64_t> m_serial{0};
 
     std::atomic<bool> m_loaded{false};   // a decoder is installed (readable from any thread)
+    std::atomic<bool> m_abortIo{false};  // raised while the decode thread is being stopped
+    bool m_resync = false;               // m_control: re-seek before decoding again
 
     // Decode-thread state.
     std::unique_ptr<decoders::IAudioDecoder> m_decoder;

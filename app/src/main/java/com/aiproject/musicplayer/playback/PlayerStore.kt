@@ -19,6 +19,8 @@ data class PlayerSettings(
     val limiter: Boolean = true,
     /** Measure (EBU R128) upcoming tracks that have no ReplayGain tags. */
     val autoAnalyze: Boolean = true,
+    /** Visible on the network as a DLNA / UPnP renderer. */
+    val renderer: Boolean = false,
 )
 
 data class SavedQueue(
@@ -53,6 +55,7 @@ class PlayerStore(context: Context) {
         crossfeed = CrossfeedMode.fromId(prefs.getInt(KEY_CROSSFEED, 0)),
         limiter = prefs.getBoolean(KEY_LIMITER, true),
         autoAnalyze = prefs.getBoolean(KEY_AUTO_ANALYZE, true),
+        renderer = prefs.getBoolean(KEY_RENDERER, false),
     )
 
     fun saveSettings(s: PlayerSettings) {
@@ -71,6 +74,7 @@ class PlayerStore(context: Context) {
             .putInt(KEY_CROSSFEED, s.crossfeed.id)
             .putBoolean(KEY_LIMITER, s.limiter)
             .putBoolean(KEY_AUTO_ANALYZE, s.autoAnalyze)
+            .putBoolean(KEY_RENDERER, s.renderer)
             .apply()
     }
 
@@ -160,6 +164,7 @@ class PlayerStore(context: Context) {
         private const val KEY_CROSSFEED = "crossfeed_mode"
         private const val KEY_LIMITER = "true_peak_limiter"
         private const val KEY_AUTO_ANALYZE = "loudness_auto_analyze"
+        private const val KEY_RENDERER = "dlna_renderer"
 
         fun encodeTracks(tracks: List<Track>): String = JSONArray().apply {
             tracks.forEach { t ->

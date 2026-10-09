@@ -10,6 +10,8 @@
 namespace audio_engine {
 namespace decoders {
 
+class FileSource;
+
 enum class Codec : int {
     Unknown = 0,
     Flac = 1,
@@ -65,6 +67,9 @@ public:
     virtual Codec getCodec() const = 0;
     /** Native 1-bit rate for DSD sources, 0 otherwise. */
     virtual uint32_t getDsdRate() const { return 0; }
+
+    /** The byte source the decoder reads through, if it uses one (streaming, abort). */
+    virtual FileSource* fileSource() { return nullptr; }
 };
 
 } // namespace decoders

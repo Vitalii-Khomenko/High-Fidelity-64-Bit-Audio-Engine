@@ -12,8 +12,11 @@
   password-protected TTA are not supported. CUE sheets are read from folders
   added through the Storage Access Framework, not from the MediaStore scan, and
   CUE sheets embedded in FLAC files are not read yet.
-- **DLNA** downloads a track completely before it plays (2 GiB limit, 512 MiB
-  cache). There is no streaming playback.
+- **DLNA** streams FLAC, WAV / AIFF, WavPack and TTA (playback starts after
+  512 KiB); MP3, Ogg, APE and MP4 still download completely first because their
+  decoders read the end of the file when opening (2 GiB limit, 512 MiB cache).
+  The renderer works while the app is open or playing; Android does not allow
+  a background app to start playback from the network at any time.
 - **Time-stretch** uses Sonic, which is tuned for speech; at speeds far from 1×
   dense music can sound phasey.
 - **EQ changes** become audible after the ~300 ms decode buffer (volume is immediate).

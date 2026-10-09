@@ -59,6 +59,7 @@ public:
     uint64_t getCurrentFrame() const override { return m_position; }
     Codec getCodec() const override { return m_inner->getCodec(); }
     uint32_t getDsdRate() const override { return m_inner->getDsdRate(); }
+    FileSource* fileSource() override { return m_inner->fileSource(); }
 
 private:
     RangeDecoder(std::unique_ptr<IAudioDecoder> inner, uint64_t start, uint64_t end)

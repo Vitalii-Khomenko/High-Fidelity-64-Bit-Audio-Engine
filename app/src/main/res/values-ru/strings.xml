@@ -173,4 +173,10 @@
     <string name="analyzing">Измерено %1$d / %2$d</string>
     <string name="limiter">Лимитер истинного пика</string>
     <string name="limiter_hint">Держит межсэмпловые пики ниже −1 dBTP после усиления и EQ. Ниже этого уровня сигнал проходит без изменений до бита.</string>
+    <!-- DLNA-рендерер -->
+    <string name="renderer">Играть на этом телефоне (DLNA)</string>
+    <string name="renderer_hint">Другие устройства в той же сети Wi-Fi (BubbleUPnP, foobar2000, «Передать на устройство» в Windows, Kodi…) видят телефон как плеер и могут отправлять на него музыку. Работает, пока приложение открыто или играет.</string>
+    <string name="renderer_visible">Виден как %1$s</string>
+    <string name="renderer_no_network">Нет сети Wi-Fi: рендерер не запустился</string>
+    <string name="renderer_folder">DLNA</string>
 </resources>

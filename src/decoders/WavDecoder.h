@@ -80,6 +80,7 @@ public:
     Codec getCodec() const override {
         return m_initialized && m_wav.container == drwav_container_aiff ? Codec::Aiff : Codec::Wav;
     }
+    FileSource* fileSource() override { return &m_source; }
 
 private:
     FileSource m_source;

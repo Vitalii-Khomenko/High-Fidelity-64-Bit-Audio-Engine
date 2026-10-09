@@ -53,6 +53,7 @@ public:
     uint64_t getTotalFrames() const override { return m_flac ? m_flac->totalPCMFrameCount : 0; }
     uint64_t getCurrentFrame() const override { return m_flac ? m_flac->currentPCMFrame : 0; }
     Codec getCodec() const override { return Codec::Flac; }
+    FileSource* fileSource() override { return &m_source; }
 
 private:
     FileSource m_source;

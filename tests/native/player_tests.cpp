@@ -1,11 +1,13 @@
 // AudioPlayer + OboeOutput scenarios against the simulated Oboe in stubs/.
 #include <atomic>
+#include <fcntl.h>
 #include <chrono>
 #include <thread>
 
 #include "test_util.h"
 
 #include "core/AudioPlayer.h"
+#include "decoders/DecoderFactory.h"
 #include "decoders/WavDecoder.h"
 
 using namespace audio_engine;
@@ -490,6 +492,90 @@ void testOutputDspToggles() {
     CHECK(std::fabs(mono[2 * 20000] - 0.25f) < 2e-3f);
 }
 
+// ── DLNA streaming: playing a file while it is still being downloaded ─────
+
+using test::Bytes;
+using test::le;
+using test::tag;
+
+/** 16-bit stereo WAV of constant 0.25 (8192). */
+Bytes constantWav(uint32_t frames) {
+    Bytes b; tag(b, "RIFF"); le(b, 36 + frames * 4, 4); tag(b, "WAVE"); tag(b, "fmt "); le(b, 16, 4);
+    le(b, 1, 2); le(b, 2, 2); le(b, 48000, 4); le(b, 48000 * 4, 4); le(b, 4, 2); le(b, 16, 2);
+    tag(b, "data"); le(b, frames * 4, 4);
+    for (uint32_t i = 0; i < frames * 2; ++i) le(b, 8192, 2);
+    return b;
+}
+
+struct Download {
+    std::string path;
+    int fd = -1;
+    std::shared_ptr<decoders::StreamState> state = std::make_shared<decoders::StreamState>();
+    Bytes bytes;
+    size_t written = 0;
+
+    explicit Download(Bytes all) : bytes(std::move(all)) {
+        char tmpl[] = "/tmp/hifi-stream-XXXXXX";
+        const int w = mkstemp(tmpl);
+        CHECK(w >= 0);
+        path = tmpl;
+        ::close(w);
+        fd = ::open(path.c_str(), O_RDONLY);
+        state->total.store(bytes.size());
+    }
+    ~Download() { ::close(fd); unlink(path.c_str()); }
+    void append(size_t n) {
+        n = std::min(n, bytes.size() - written);
+        FILE* f = std::fopen(path.c_str(), "ab");
+        CHECK(f && std::fwrite(bytes.data() + written, 1, n, f) == n);
+        std::fclose(f);
+        written += n;
+        state->available.store(written);
+        if (written == bytes.size()) state->status.store(decoders::StreamState::Complete);
+    }
+};
+
+void testStreamingStallPauseResume() {
+    Download dl(constantWav(48000 * 2));   // 2 s, 384 KiB
+    dl.append(64 * 1024);                  // ~0.33 s available at the start
+    core::AudioPlayer p;
+    auto decoder = decoders::openDecoder(dl.fd, dl.state);
+    CHECK(decoder && decoder->getTotalFrames() == 96000);   // size from the stream, not the partial file
+    CHECK(p.load(std::move(decoder), 1.0));
+    startCapture();
+    CHECK(p.play());
+    // The player runs into the missing part and waits. Pause during the stall.
+    std::this_thread::sleep_for(600ms);
+    p.pause();
+    CHECK(p.state() == PlayerState::Paused);
+    // The rest arrives in pieces, slowly at first, then all of it.
+    std::thread feeder([&] {
+        for (int i = 0; i < 10; ++i) { dl.append(16 * 1024); std::this_thread::sleep_for(40ms); }
+        dl.append(dl.bytes.size());
+    });
+    CHECK(p.play());
+    CHECK(waitFor([&] { return p.state() == PlayerState::Ended; }, 8000ms));
+    feeder.join();
+    oboe::capture = false;
+    const auto out = takeCapture();
+    const size_t full = countLevel(out, 0.25f);
+    // Every frame once: the paused stall re-synced the decoder at the audible frame.
+    CHECK(full > 96000 - 2400 && full <= 96000);
+    CHECK_NEAR(p.positionMs(), 2000.0, 0.5);
+}
+
+void testStreamingFailedDownloadEnds() {
+    Download dl(constantWav(48000 * 2));
+    dl.append(100 * 1024);
+    core::AudioPlayer p;
+    CHECK(p.load(decoders::openDecoder(dl.fd, dl.state), 1.0));
+    CHECK(p.play());
+    std::this_thread::sleep_for(200ms);
+    dl.state->status.store(decoders::StreamState::Failed);   // connection lost
+    CHECK(waitFor([&] { return p.state() == PlayerState::Ended; }, 4000ms));
+    CHECK(p.positionMs() < 600.0);   // only what had arrived was played
+}
+
 void testSpeed() {
     core::AudioPlayer p;
     CHECK(p.load(std::make_unique<ToneDecoder>(48000, 48000, 2, 0.25, 440.0), 1.0));
@@ -605,6 +691,8 @@ int main() {
     testFailedRestartIsReported();
     testLimiterAndEq();
     testOutputDspToggles();
+    testStreamingStallPauseResume();
+    testStreamingFailedDownloadEnds();
     testSpeed();
     testSpectrum();
     testConcurrentControl();

@@ -97,6 +97,7 @@ public:
     uint64_t getTotalFrames() const override { return m_total; }
     uint64_t getCurrentFrame() const override { return m_position; }
     Codec getCodec() const override { return Codec::Tta; }
+    FileSource* fileSource() override { return &m_source; }
 
 private:
     // libtta passes this struct back to the callbacks; the callback table is

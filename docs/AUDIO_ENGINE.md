@@ -155,7 +155,16 @@ The callback never blocks on it.
 | `RangeDecoder` | — | A `[start, end)` section of another decoder: a CUE sheet track |
 
 Every decoder reads through `FileSource`: a private `dup()` of the descriptor
-with its own offset and `pread()`, so decoders never share a file position with
+with its own offset and `pread()`. For **DLNA streaming** a `FileSource` can be
+attached to a `StreamState` (bytes downloaded so far, final size, status)
+registered by the app: its size is the final size and a read past the
+downloaded part waits. The wait ends when the download fails, stalls for 20 s,
+or the player raises its abort flag while stopping the decode thread (pause,
+seek, load); a read cut short that way is recorded and the player re-syncs the
+decoder with a seek to the audible frame before decoding again, so a pause
+during a stall loses or repeats nothing. Streams are only offered for FLAC,
+WAV / AIFF, WavPack and TTA, whose open needs just the start of the file.
+Readers so decoders never share a file position with
 each other or with the tag reader. The libraries' I/O callbacks (vorbisfile,
 opusfile, WavPack stream reader, `IAPEIO`, `TTA_io_callback`) are thin adapters
 over it.

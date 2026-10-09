@@ -36,6 +36,11 @@ import androidx.media.session.MediaButtonReceiver
 import com.aiproject.musicplayer.AudioEngine
 import com.aiproject.musicplayer.MainActivity
 import com.aiproject.musicplayer.R
+import com.aiproject.musicplayer.dlna.RendererHost
+import com.aiproject.musicplayer.dlna.RendererProtocol
+import com.aiproject.musicplayer.dlna.RendererServer
+import com.aiproject.musicplayer.dlna.RendererStatus
+import com.aiproject.musicplayer.dlna.TransportState
 import com.aiproject.musicplayer.library.CoverArt
 import com.aiproject.musicplayer.library.CoverProvider
 import com.aiproject.musicplayer.library.DlnaPlaybackCache
@@ -104,6 +109,15 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
     private var analysisJob: Job? = null            // upcoming queue tracks
     private var libraryAnalysisJob: Job? = null
     private var analysisProgress: Pair<Int, Int>? = null
+    // DLNA renderer
+    private var renderer: RendererServer? = null
+    private val main = Handler(Looper.getMainLooper())
+    @Volatile private var rendererStatus = RendererStatus(TransportState.NO_MEDIA, "", "", "", "", 0, 0, 100, false)
+    private var rendererUri = ""                    // last URI a control point set, with its DIDL metadata
+    private var rendererMetadata = ""
+    private var rendererNext: Pair<String, String>? = null
+    private var rendererStopped = false
+    private var muted = false
     private var art: Bitmap? = null                 // cover of the current track
     private var artUri: String? = null
     private var artJob: Job? = null
@@ -184,6 +198,7 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         )
         restoreState()
         startMonitor()
+        if (settings.renderer) startRenderer()
         // First start after an update (or a cleared index): build the library in the background.
         scope.launch {
             val empty = runCatching { library.count().first() == 0 }.getOrDefault(false)
@@ -366,6 +381,9 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
     }
 
     override fun onDestroy() {
+        renderer?.stop()
+        renderer = null
+        runCatching { if (multicastLock?.isHeld == true) multicastLock?.release() }
         saveResumePoint()
         scope.cancel()
         try { unregisterReceiver(noisyReceiver) } catch (_: Exception) {}
@@ -664,6 +682,140 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         }
     }
 
+    override fun setRenderer(enabled: Boolean) {
+        updateSettings(settings.copy(renderer = enabled))
+        if (enabled) startRenderer() else stopRenderer()
+        publish()
+    }
+
+    private fun rendererName(): String = "HiFi Player (${Build.MODEL})"
+
+    private var multicastLock: android.net.wifi.WifiManager.MulticastLock? = null
+
+    /** A stable device id, so control points remember this renderer. */
+    private fun rendererUdn(): String {
+        val prefs = getSharedPreferences("dlna_renderer", MODE_PRIVATE)
+        return prefs.getString("udn", null) ?: java.util.UUID.randomUUID().toString().also { prefs.edit().putString("udn", it).apply() }
+    }
+
+    private fun startRenderer() {
+        if (renderer?.isRunning == true) return
+        val server = RendererServer(rendererHost, rendererName(), rendererUdn())
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) { runCatching { server.start() }.getOrDefault(false) }
+            if (ok && settings.renderer) {
+                renderer = server
+                // Some phones drop multicast (SSDP searches) without a lock.
+                multicastLock = (applicationContext.getSystemService(WIFI_SERVICE) as? android.net.wifi.WifiManager)
+                    ?.createMulticastLock("hifi-renderer")?.apply { setReferenceCounted(false); acquire() }
+            } else {
+                withContext(Dispatchers.IO) { server.stop() }
+                if (settings.renderer) _messages.tryEmit(getString(R.string.renderer_no_network))
+            }
+            publish()
+        }
+    }
+
+    private fun stopRenderer() {
+        runCatching { if (multicastLock?.isHeld == true) multicastLock?.release() }
+        multicastLock = null
+        val server = renderer ?: return
+        renderer = null
+        scope.launch(Dispatchers.IO) { server.stop() }
+    }
+
+    // ── Renderer host: called on the renderer's threads ─────────────────────
+
+    private fun onMain(block: () -> Unit) {
+        main.post(block)
+    }
+
+    private fun rendererTrack(uri: String, metadata: String): Track {
+        val info = RendererProtocol.parseDidl(metadata)
+        val name = Uri.parse(uri).lastPathSegment?.substringBeforeLast('.').orEmpty()
+        return Track(uri, info.title.ifBlank { name.ifBlank { uri } }, folder = getString(R.string.renderer_folder), artist = info.artist, album = info.album)
+    }
+
+    private val rendererHost = object : RendererHost {
+        override fun status(): RendererStatus = rendererStatus.copy(positionMs = _position.value.positionMs)
+
+        override fun setUri(uri: String, metadata: String) = onMain {
+            rendererUri = uri
+            rendererMetadata = metadata
+            rendererNext = null
+            rendererStopped = false
+            // Like a hardware renderer: a new URI replaces what plays and keeps playing if it was.
+            setQueue(listOf(rendererTrack(uri, metadata)), 0, wantPlaying)
+        }
+
+        override fun setNextUri(uri: String, metadata: String) = onMain {
+            val current = queue.current ?: return@onMain
+            if (uri.isEmpty()) {
+                rendererNext = null
+                queue.restore(listOf(current), 0, false, emptyList())
+            } else {
+                rendererNext = uri to metadata
+                queue.restore(listOf(current, rendererTrack(uri, metadata)).distinctBy { it.uri }, 0, false, emptyList())
+            }
+            queueChanged(saveTracks = true)
+        }
+
+        override fun play() = onMain {
+            rendererStopped = false
+            this@PlaybackService.play()
+        }
+
+        override fun pause() = onMain { this@PlaybackService.pause() }
+
+        override fun stop() = onMain {
+            // Stopped, not shut down: the renderer and the service stay.
+            pauseInternal(keepFocus = false)
+            seekTo(0L)
+            rendererStopped = true
+            publish()
+        }
+
+        override fun seek(positionMs: Long) = onMain { seekTo(positionMs) }
+        override fun next() = onMain { this@PlaybackService.next() }
+        override fun previous() = onMain { this@PlaybackService.previous() }
+        override fun setVolume(percent: Int) = onMain { this@PlaybackService.setVolume(percent / 100f) }
+
+        override fun setMute(muted: Boolean) = onMain {
+            this@PlaybackService.muted = muted
+            applyVolume()
+            publish()
+        }
+    }
+
+    /** Snapshot for control points (read on the renderer's threads). */
+    private fun updateRendererStatus() {
+        if (renderer == null) return
+        val track = queue.current
+        val state = when {
+            track == null -> TransportState.NO_MEDIA
+            loadJob?.isActive == true -> TransportState.TRANSITIONING
+            wantPlaying -> TransportState.PLAYING
+            rendererStopped -> TransportState.STOPPED
+            else -> TransportState.PAUSED
+        }
+        val uri = track?.uri.orEmpty()
+        val metadata = if (uri == rendererUri && rendererMetadata.isNotEmpty()) rendererMetadata
+        else track?.let { RendererProtocol.didl(it.uri, it.title, it.artist, it.album, it.durationMs) }.orEmpty()
+        val next = queue.tracks.getOrNull(queue.peekNext(auto = true))
+        rendererStatus = RendererStatus(
+            transport = state,
+            uri = uri,
+            metadata = metadata,
+            nextUri = next?.uri.orEmpty(),
+            nextMetadata = if (next != null && next.uri == rendererNext?.first) rendererNext?.second.orEmpty() else "",
+            positionMs = _position.value.positionMs,
+            durationMs = _position.value.durationMs.coerceAtLeast(track?.durationMs ?: 0L),
+            volume = (settings.volume * 100).toInt(),
+            muted = muted,
+        )
+        renderer?.notifyChanged()
+    }
+
     override fun setContentMode(mode: ContentMode) {
         updateSettings(settings.copy(contentMode = mode))
     }
@@ -796,6 +948,8 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         val track = queue.current ?: return
         idleStopJob?.cancel()
         invalidatePreload()
+        // DLNA downloads for tracks that are neither current nor next are no longer needed.
+        DlnaPlaybackCache.retainOnly(setOfNotNull(track.uri, queue.tracks.getOrNull(queue.peekNext(auto = true))?.uri))
         lastPreloadedUri = null
         loadJob?.cancel()
         wantPlaying = true
@@ -814,16 +968,15 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         }
         loadJob = scope.launch {
             val ok = try {
-                val playable = withContext(Dispatchers.IO) {
-                    DlnaPlaybackCache.resolvePlaybackUri(Uri.parse(track.uri), cacheDir)
-                }
+                val resolved = DlnaPlaybackCache.resolve(Uri.parse(track.uri), cacheDir)
+                val playable = resolved.uri
                 val measured = if (settings.replayGain != ReplayGainMode.OFF) {
                     withContext(Dispatchers.IO) { runCatching { loudness.fallbackFor(track.uri) }.getOrNull() }
                 } else {
                     null
                 }
                 withContext(engineDispatcher) {
-                    if (!engine.load(this@PlaybackService, playable, settings.replayGain, measured)) return@withContext false
+                    if (!engine.load(this@PlaybackService, playable, settings.replayGain, measured, resolved)) return@withContext false
                     if (startMs > 0L) engine.seekTo(startMs)
                     ensureActive()  // a newer request replaced this one: load, but do not start
                     engine.play()
@@ -951,14 +1104,13 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         preloadTargetUri = track.uri
         preloadJob = scope.launch {
             val ok = try {
-                val playable = withContext(Dispatchers.IO) {
-                    DlnaPlaybackCache.resolvePlaybackUri(Uri.parse(track.uri), cacheDir)
-                }
+                val resolved = DlnaPlaybackCache.resolve(Uri.parse(track.uri), cacheDir)
+                val playable = resolved.uri
                 // loadNext only touches the engine's next-track slot; no need to
                 // wait behind transport calls.
                 withContext(Dispatchers.IO) {
                     val measured = if (replayGain != ReplayGainMode.OFF) runCatching { loudness.fallbackFor(track.uri) }.getOrNull() else null
-                    engine.loadNext(this@PlaybackService, playable, replayGain, measured)
+                    engine.loadNext(this@PlaybackService, playable, replayGain, measured, resolved)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -1156,13 +1308,15 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
             importing = importing,
             libraryUpdate = libraryProgress,
             analysis = analysisProgress,
+            rendererName = if (renderer != null) rendererName() else null,
         )
         if (::browseTree.isInitialized) publishSessionQueue()
         updateSessionState()
+        updateRendererStatus()
     }
 
     private fun applyVolume() {
-        engine.setVolume(settings.volume * duckFactor * sleepFactor)
+        engine.setVolume(if (muted) 0.0 else settings.volume * duckFactor * sleepFactor)
     }
 
     private fun applyEq(eq: EqSettings) = engine.setEq(eq)

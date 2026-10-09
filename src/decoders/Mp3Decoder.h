@@ -73,6 +73,7 @@ public:
         return m_mp3.currentPCMFrame > delay ? m_mp3.currentPCMFrame - delay : 0;
     }
     Codec getCodec() const override { return Codec::Mp3; }
+    FileSource* fileSource() override { return &m_source; }
 
     size_t getSeekPointCount() const { return m_seekPoints.size(); }
 

@@ -90,6 +90,7 @@ public:
     uint64_t getTotalFrames() const override { return m_total; }
     uint64_t getCurrentFrame() const override { return m_position; }
     Codec getCodec() const override { return Codec::Ape; }
+    FileSource* fileSource() override { return &m_source; }
 
 private:
     /** IAPEIO over our FileSource (read-only). */

@@ -22,6 +22,9 @@ interface PlayerCommands {
     /** Measures every library track without ReplayGain tags (EBU R128), in the background. */
     fun analyzeLibrary()
     fun cancelAnalysis()
+
+    /** Shows this phone to DLNA control points as a player (Wi-Fi). */
+    fun setRenderer(enabled: Boolean)
     fun setContentMode(mode: ContentMode)
     fun startSleepTimer(durationMs: Long)
     fun cancelSleepTimer()

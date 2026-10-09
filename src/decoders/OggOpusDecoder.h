@@ -84,6 +84,7 @@ public:
         return pos > 0 ? static_cast<uint64_t>(pos) : 0;
     }
     Codec getCodec() const override { return Codec::Opus; }
+    FileSource* fileSource() override { return &m_source; }
 
 private:
     FileSource m_source;

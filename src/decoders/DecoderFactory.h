@@ -102,13 +102,23 @@ inline std::unique_ptr<IAudioDecoder> makeDecoder(Container kind) {
     }
 }
 
-/** Opens fd (not taken over) with the decoder its signature calls for. */
-inline std::unique_ptr<IAudioDecoder> openDecoder(int fd) {
+/**
+ * Opens fd (not taken over) with the decoder its signature calls for. With a
+ * [stream], the file is still being downloaded: only decoders that read
+ * through FileSource can follow it.
+ */
+inline std::unique_ptr<IAudioDecoder> openDecoder(int fd, std::shared_ptr<StreamState> stream = nullptr) {
     const Container kind = sniff(fd);
     if (auto decoder = makeDecoder(kind)) {
+        if (stream) {
+            FileSource* source = decoder->fileSource();
+            if (!source) return nullptr;
+            source->attachStream(std::move(stream));
+        }
         if (decoder->openFd(fd)) return decoder;
         return nullptr;
     }
+    if (stream) return nullptr;
     // No recognisable signature (e.g. MP3 behind junk bytes): try permissive decoders.
     for (Container fallback : {Container::Flac, Container::Riff, Container::Mp3}) {
         auto decoder = makeDecoder(fallback);

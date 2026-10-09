@@ -21,6 +21,8 @@ data class PlayerState(
     val libraryUpdate: LibraryIndex.Progress? = null,
     /** Loudness analysis of the library: tracks done and total, null when idle. */
     val analysis: Pair<Int, Int>? = null,
+    /** Name the renderer is visible under, null when it is off. */
+    val rendererName: String? = null,
 ) {
     val current: Track? get() = tracks.getOrNull(currentIndex)
     val totalDurationMs: Long get() = tracks.sumOf { it.durationMs.coerceAtLeast(0L) }

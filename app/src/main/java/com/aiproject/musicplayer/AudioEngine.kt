@@ -2,6 +2,7 @@ package com.aiproject.musicplayer
 
 import android.content.Context
 import android.net.Uri
+import com.aiproject.musicplayer.library.Playable
 import com.aiproject.musicplayer.playback.CrossfeedMode
 import com.aiproject.musicplayer.playback.EqSettings
 import com.aiproject.musicplayer.playback.PlayableUri
@@ -53,17 +54,30 @@ class AudioEngine {
      * Opens [uri] (content:// or file://, optionally a CUE range, see
      * [PlayableUri]) and makes it current, paused at 0.
      */
-    fun load(context: Context, uri: Uri, replayGain: ReplayGainMode, measuredGain: DoubleArray? = null): Boolean {
+    fun load(context: Context, uri: Uri, replayGain: ReplayGainMode, measuredGain: DoubleArray? = null, stream: Playable? = null): Boolean {
         val parts = PlayableUri.split(uri.toString())
-        val fd = openFd(context, Uri.parse(parts.fileUri)) ?: return false
-        return nativeLoad(id, fd, replayGain.id, parts.startUs, parts.endUs, measuredGain)
+        val (fd, streamId) = open(context, Uri.parse(parts.fileUri), stream) ?: return false
+        return nativeLoad(id, fd, replayGain.id, parts.startUs, parts.endUs, measuredGain, streamId)
     }
 
     /** Queues [uri] for a gapless transition after the current track. */
-    fun loadNext(context: Context, uri: Uri, replayGain: ReplayGainMode, measuredGain: DoubleArray? = null): Boolean {
+    fun loadNext(context: Context, uri: Uri, replayGain: ReplayGainMode, measuredGain: DoubleArray? = null, stream: Playable? = null): Boolean {
         val parts = PlayableUri.split(uri.toString())
-        val fd = openFd(context, Uri.parse(parts.fileUri)) ?: return false
-        return nativeLoadNext(id, fd, replayGain.id, parts.startUs, parts.endUs, measuredGain)
+        val (fd, streamId) = open(context, Uri.parse(parts.fileUri), stream) ?: return false
+        return nativeLoadNext(id, fd, replayGain.id, parts.startUs, parts.endUs, measuredGain, streamId)
+    }
+
+    /**
+     * A descriptor for [uri]. A download still in progress is opened with its
+     * stream id; if it finished (and was renamed) meanwhile, its final file.
+     */
+    private fun open(context: Context, uri: Uri, stream: Playable?): Pair<Int, Long>? {
+        if (stream != null && stream.streamId != 0L) {
+            openFd(context, stream.uri)?.let { return it to stream.streamId }
+            stream.completeUri?.let { complete -> openFd(context, complete)?.let { return it to 0L } }
+            return null
+        }
+        return openFd(context, uri)?.let { it to 0L }
     }
 
     fun clearNext() = nativeClearNext(id)
@@ -123,8 +137,8 @@ class AudioEngine {
 
     private external fun nativeCreate(): Long
     private external fun nativeRelease(id: Long)
-    private external fun nativeLoad(id: Long, fd: Int, replayGainMode: Int, startUs: Long, endUs: Long, fallbackGain: DoubleArray?): Boolean
-    private external fun nativeLoadNext(id: Long, fd: Int, replayGainMode: Int, startUs: Long, endUs: Long, fallbackGain: DoubleArray?): Boolean
+    private external fun nativeLoad(id: Long, fd: Int, replayGainMode: Int, startUs: Long, endUs: Long, fallbackGain: DoubleArray?, streamId: Long): Boolean
+    private external fun nativeLoadNext(id: Long, fd: Int, replayGainMode: Int, startUs: Long, endUs: Long, fallbackGain: DoubleArray?, streamId: Long): Boolean
     private external fun nativeClearNext(id: Long)
     private external fun nativePlay(id: Long): Boolean
     private external fun nativePause(id: Long)

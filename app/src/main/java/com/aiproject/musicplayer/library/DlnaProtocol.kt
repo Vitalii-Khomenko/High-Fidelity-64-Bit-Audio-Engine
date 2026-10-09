@@ -43,7 +43,7 @@ internal object DlnaProtocol {
   </s:Body>
 </s:Envelope>"""
 
-    private fun parseXml(xml: String): Element? = try {
+    internal fun parseXml(xml: String): Element? = try {
         // No DTDs at all: rules out entity expansion and external entity reads.
         require(!xml.contains("<!DOCTYPE", ignoreCase = true) && !xml.contains("<!ENTITY", ignoreCase = true))
         val factory = DocumentBuilderFactory.newInstance().apply {
@@ -57,7 +57,7 @@ internal object DlnaProtocol {
         null
     }
 
-    private fun Element.descendants(name: String): List<Element> {
+    internal fun Element.descendants(name: String): List<Element> {
         val nodes = getElementsByTagNameNS("*", name)
         return (0 until nodes.length).mapNotNull { nodes.item(it) as? Element }
     }
@@ -148,7 +148,7 @@ internal object DlnaProtocol {
         return if (millis < Long.MAX_VALUE.toDouble()) Math.round(millis) else 0L
     }
 
-    private fun xmlEscape(value: String): String = buildString(value.length) {
+    internal fun xmlEscape(value: String): String = buildString(value.length) {
         value.forEach { ch ->
             when (ch) {
                 '&' -> append("&amp;")
