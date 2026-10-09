@@ -154,7 +154,15 @@ fun PlayerScreen(
             onConfirm = { name ->
                 askSave = false
                 scope.launch {
-                    PlaylistStore(MusicDatabase.getDatabase(context)).save(name, state.tracks, state.shuffle)
+                    val message = try {
+                        PlaylistStore(MusicDatabase.getDatabase(context)).save(name, state.tracks, state.shuffle)
+                        context.getString(R.string.playlist_saved, name)
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        context.getString(R.string.playlist_error)
+                    }
+                    android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_SHORT).show()
                 }
             },
         )

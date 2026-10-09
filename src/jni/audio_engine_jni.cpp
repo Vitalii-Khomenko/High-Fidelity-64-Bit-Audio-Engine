@@ -27,7 +27,19 @@ namespace {
 // instance (e.g. by a service being destroyed) can never touch a newer one.
 struct Instance {
     std::shared_ptr<AudioPlayer> player = std::make_shared<AudioPlayer>();
-    std::atomic<uint64_t> nextGeneration{0};
+    // Guards nextGeneration together with publishing a pre-loaded decoder, so
+    // "check generation, then setNext" cannot interleave with clearNext()/load().
+    std::mutex nextLock;
+    uint64_t nextGeneration = 0;
+
+    void invalidateNext() {
+        std::lock_guard<std::mutex> lock(nextLock);
+        ++nextGeneration;
+    }
+    uint64_t generation() {
+        std::lock_guard<std::mutex> lock(nextLock);
+        return nextGeneration;
+    }
 };
 
 std::mutex g_mutex;
@@ -117,7 +129,7 @@ Java_com_aiproject_musicplayer_AudioEngine_nativeRelease(JNIEnv*, jobject, jlong
         released = std::move(it->second);
         g_instances.erase(it);
     }
-    ++released->nextGeneration;
+    released->invalidateNext();
     // Destroyed here (or by the last in-flight call) outside the mutex.
 }
 
@@ -127,7 +139,7 @@ Java_com_aiproject_musicplayer_AudioEngine_nativeLoad(JNIEnv*, jobject, jlong id
     OwnedFd owned{fd};
     auto inst = instance(id);
     if (fd < 0 || !inst) return JNI_FALSE;
-    ++inst->nextGeneration;
+    inst->invalidateNext();  // any pre-load still being opened is stale now
     auto decoder = openDecoder(fd);
     if (!decoder) return JNI_FALSE;
     const double gain = gainFor(fd, replayGainMode);
@@ -140,12 +152,15 @@ Java_com_aiproject_musicplayer_AudioEngine_nativeLoadNext(JNIEnv*, jobject, jlon
     OwnedFd owned{fd};
     auto inst = instance(id);
     if (fd < 0 || !inst) return JNI_FALSE;
-    const uint64_t generation = inst->nextGeneration.load();
+    const uint64_t generation = inst->generation();
     auto decoder = openDecoder(fd);
     if (!decoder) return JNI_FALSE;
     const double gain = gainFor(fd, replayGainMode);
-    if (generation != inst->nextGeneration.load()) return JNI_FALSE;
-    inst->player->setNext(std::move(decoder), gain);
+    {
+        std::lock_guard<std::mutex> lock(inst->nextLock);
+        if (generation != inst->nextGeneration) return JNI_FALSE;
+        inst->player->setNext(std::move(decoder), gain);
+    }
     return JNI_TRUE;
 }
 
@@ -153,6 +168,7 @@ JNIEXPORT void JNICALL
 Java_com_aiproject_musicplayer_AudioEngine_nativeClearNext(JNIEnv*, jobject, jlong id) {
     auto inst = instance(id);
     if (!inst) return;
+    std::lock_guard<std::mutex> lock(inst->nextLock);
     ++inst->nextGeneration;
     inst->player->clearNext();
 }

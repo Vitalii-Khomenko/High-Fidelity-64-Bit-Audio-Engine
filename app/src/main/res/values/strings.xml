@@ -127,4 +127,6 @@
 
     <string name="error_cannot_play">Cannot play %1$s</string>
     <string name="error_audio_focus">Another app is holding audio focus</string>
+    <string name="folder_access_temporary">%1$s: this storage only allows access until the app restarts; add it again afterwards</string>
+    <string name="playlist_error">The playlist could not be saved or read</string>
 </resources>

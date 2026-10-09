@@ -128,4 +128,6 @@
 
     <string name="error_cannot_play">Не удалось воспроизвести: %1$s</string>
     <string name="error_audio_focus">Аудиофокус занят другим приложением</string>
+    <string name="folder_access_temporary">%1$s: это хранилище даёт доступ только до перезапуска приложения, потом папку нужно добавить снова</string>
+    <string name="playlist_error">Не удалось сохранить или прочитать плейлист</string>
 </resources>

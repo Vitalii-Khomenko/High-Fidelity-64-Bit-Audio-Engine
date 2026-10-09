@@ -106,9 +106,7 @@ internal object DlnaProtocol {
             val upnpClass = item.descendants("class").firstOrNull()?.textContent.orEmpty()
             if (upnpClass.isNotEmpty() && !upnpClass.startsWith("object.item.audioItem")) return@mapNotNull null
             val title = item.descendants("title").firstOrNull()?.textContent?.trim() ?: return@mapNotNull null
-            val resource = item.directChildren("res").firstOrNull { res ->
-                runCatching { URL(res.textContent.trim()).protocol in setOf("http", "https") }.getOrDefault(false)
-            } ?: return@mapNotNull null
+            val resource = pickResource(item.directChildren("res")) ?: return@mapNotNull null
             DlnaTrack(title, resource.textContent.trim(), parseDurationMs(resource.getAttribute("duration")))
         }
         val count = if (returned >= 0) returned else containers.size + tracks.size
@@ -116,6 +114,28 @@ internal object DlnaProtocol {
     }
 
     fun parseBrowse(soapXml: String): List<DlnaTrack> = parseBrowsePage(soapXml).tracks
+
+    /**
+     * The first HTTP(S) resource the engine can decode, judged by the file
+     * extension or, without one, by the MIME type in protocolInfo
+     * ("http-get:*:audio/flac:*"). A resource with neither is accepted only if
+     * nothing better exists. Items with only unsupported resources are skipped.
+     */
+    private fun pickResource(resources: List<Element>): Element? {
+        var unknown: Element? = null
+        for (res in resources) {
+            val url = runCatching { URL(res.textContent.trim()) }.getOrNull() ?: continue
+            if (url.protocol != "http" && url.protocol != "https") continue
+            val name = url.path.substringAfterLast('/')
+            val mime = res.getAttribute("protocolInfo").split(':').getOrNull(2)?.takeIf { it.isNotBlank() && it != "*" }
+            when {
+                name.contains('.') -> if (SupportedFormats.isSupportedName(name)) return res
+                mime != null -> if (SupportedFormats.isSupported(name, mime)) return res
+                else -> if (unknown == null) unknown = res
+            }
+        }
+        return unknown
+    }
 
     fun parseDurationMs(duration: String): Long {
         val parts = duration.trim().split(':')

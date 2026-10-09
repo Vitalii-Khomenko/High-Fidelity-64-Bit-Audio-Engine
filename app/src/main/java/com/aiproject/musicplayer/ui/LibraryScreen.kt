@@ -128,6 +128,17 @@ private fun LibraryHome(state: PlayerState, commands: PlayerCommands, onPlayed: 
 
     fun toast(text: String) = Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
 
+    // Database work reports failures (full disk, corrupt DB) instead of crashing.
+    fun playlistOp(block: suspend () -> Unit) = scope.launch {
+        try {
+            block()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            toast(context.getString(R.string.playlist_error))
+        }
+    }
+
     // Scanning runs in the service, so leaving this screen does not lose it.
     fun addFromFolder(entry: LibraryFolderEntry, play: Boolean) {
         commands.importFolder(entry.uriString, null, entry.label, play)
@@ -136,10 +147,11 @@ private fun LibraryHome(state: PlayerState, commands: PlayerCommands, onPlayed: 
 
     val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
-            val entry = LibraryFolders.add(context, uri)
+            val added = LibraryFolders.add(context, uri)
             folders = LibraryFolders.load(context)
             accessible = LibraryFolders.accessibleUris(context)
-            addFromFolder(entry, play = state.tracks.isEmpty())
+            if (!added.persisted) toast(context.getString(R.string.folder_access_temporary, added.entry.label))
+            addFromFolder(added.entry, play = state.tracks.isEmpty())
         }
     }
 
@@ -235,7 +247,7 @@ private fun LibraryHome(state: PlayerState, commands: PlayerCommands, onPlayed: 
         }
         items(playlists, key = { "pl-${it.id}" }) { playlist ->
             LibraryRow(Icons.AutoMirrored.Outlined.QueueMusic, playlist.name, null, aw.paper, onClick = {
-                scope.launch {
+                playlistOp {
                     val tracks = playlistStore.tracks(playlist.id)
                     commands.setQueue(tracks, -1, false)
                     commands.setShuffle(playlist.shuffleEnabled)
@@ -258,19 +270,19 @@ private fun LibraryHome(state: PlayerState, commands: PlayerCommands, onPlayed: 
     renaming?.let { playlist ->
         TextInputDialog(stringResource(R.string.rename_playlist), stringResource(R.string.playlist_name), stringResource(R.string.rename), playlist.name,
             onDismiss = { renaming = null },
-            onConfirm = { name -> renaming = null; scope.launch { playlistStore.rename(playlist.id, name) } })
+            onConfirm = { name -> renaming = null; playlistOp { playlistStore.rename(playlist.id, name) } })
     }
     deleting?.let { playlist ->
         ConfirmDialog(stringResource(R.string.delete_playlist), playlist.name, stringResource(R.string.delete),
             onDismiss = { deleting = null },
-            onConfirm = { deleting = null; scope.launch { playlistStore.delete(playlist) } })
+            onConfirm = { deleting = null; playlistOp { playlistStore.delete(playlist) } })
     }
     if (saving) {
         TextInputDialog(stringResource(R.string.save_playlist), stringResource(R.string.playlist_name), stringResource(R.string.save),
             onDismiss = { saving = false },
             onConfirm = { name ->
                 saving = false
-                scope.launch {
+                playlistOp {
                     playlistStore.save(name, state.tracks, state.shuffle)
                     toast(context.getString(R.string.playlist_saved, name))
                 }

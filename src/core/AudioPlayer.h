@@ -92,14 +92,17 @@ public:
         const TrackInfo info = makeInfo(*decoder, gainLinear);
         const bool sameFormat = m_output->isConfigured() &&
             m_output->sampleRate() == info.sampleRate && m_decoderChannels == info.channels;
+        m_pendingFrames = 0;
         if (sameFormat) {
             m_output->flush();
         } else if (!m_output->configure(info.sampleRate, static_cast<int>(info.channels))) {
             m_decoder.reset();
+            m_loaded.store(false, std::memory_order_release);
             m_state.store(PlayerState::Error, std::memory_order_release);
             return false;
         }
         m_decoder = std::move(decoder);
+        m_loaded.store(true, std::memory_order_release);
         m_gainLinear = gainLinear;
         prepareDsp(info.sampleRate, info.channels);
         m_seekRequest.store(-1, std::memory_order_release);
@@ -143,7 +146,8 @@ public:
     bool play() {
         std::lock_guard<std::mutex> lock(m_control);
         const PlayerState s = m_state.load(std::memory_order_acquire);
-        if (!m_decoder || s == PlayerState::Idle || s == PlayerState::Error) return false;
+        // m_decoder belongs to the decode thread; only the flag is read here.
+        if (!m_loaded.load(std::memory_order_acquire) || s == PlayerState::Idle || s == PlayerState::Error) return false;
         if (s == PlayerState::Playing) return true;
         if (s == PlayerState::Ended) seekLocked(0);
         startDecodeThread();
@@ -182,7 +186,7 @@ public:
     void seekToMs(double ms) {
         if (!std::isfinite(ms)) return;
         std::lock_guard<std::mutex> lock(m_control);
-        if (!m_decoder) return;
+        if (!m_loaded.load(std::memory_order_acquire)) return;
         // Seek within the track being heard. The decoder may already be on the
         // next track (gapless look-ahead), and it belongs to the decode thread.
         TrackInfo audible;
@@ -475,6 +479,7 @@ private:
         m_prevDecoder.reset();
         m_decoder->seekToFrame(static_cast<uint64_t>(std::max<int64_t>(frame, 0)));
         m_output->flush();
+        m_pendingFrames = 0;
         m_eq.reset();
         m_stretch.reset();
         m_stretch.setSpeed(m_speed.load(std::memory_order_acquire));
@@ -523,6 +528,7 @@ private:
                 seekAudible(seek);
                 continue;
             }
+            if (m_pendingFrames > 0 && !flushPending()) continue;
             const double speed = m_speed.load(std::memory_order_acquire);
             const bool normal = isNormalSpeed(speed);
             const bool modeChanged = m_speedModeDirty.exchange(false, std::memory_order_acq_rel);
@@ -553,9 +559,17 @@ private:
             const size_t produced = normal ? decodeNormal() : decodeStretched(speed);
             if (produced > 0) continue;
             if (m_seekRequest.load(std::memory_order_acquire) >= 0) continue;
+            if (switchPending()) {
+                // A short next track already ended while the previous one is
+                // still audible: wait until that boundary is heard, so seeks
+                // and clearNext() keep applying to the right track.
+                std::this_thread::sleep_for(std::chrono::milliseconds(4));
+                continue;
+            }
             if (!m_normalPath && !m_stretch.isDrained()) continue;
             if (finishOrAdvance()) continue;
-            if (!stopRequested() && m_seekRequest.load(std::memory_order_acquire) >= 0) continue;
+            if (!stopRequested() && (m_seekRequest.load(std::memory_order_acquire) >= 0 ||
+                                     m_revertNext.load(std::memory_order_acquire))) continue;
             break;
         }
         m_threadRunning.store(false, std::memory_order_release);
@@ -580,6 +594,7 @@ private:
             const size_t frames = m_decoder->readFrames(m_source, kChunkFrames);
             if (frames == 0) {
                 if (m_seekRequest.load(std::memory_order_acquire) >= 0) return 0;
+                if (switchPending()) break;  // decide after the earlier boundary is heard
                 // Keep feeding the stretcher across a gapless boundary.
                 const uint64_t boundary = m_output->writtenFrames() + m_stretch.getAvailableFrames();
                 if (switchToNextGapless(boundary)) continue;
@@ -599,11 +614,14 @@ private:
         return rendered;
     }
 
+    // NaN/Inf from a damaged float file would poison the EQ filter state and
+    // the output limiter; they become silence. Finite over-full-scale values
+    // are kept (the limiter handles them).
     void interleave(const AudioBuffer& src, size_t frames, double* dst) const {
         const size_t ch = m_decoderChannels;
         for (size_t c = 0; c < ch; ++c) {
             const double* in = src.getReadPointer(c);
-            for (size_t f = 0; f < frames; ++f) dst[f * ch + c] = in[f];
+            for (size_t f = 0; f < frames; ++f) dst[f * ch + c] = std::isfinite(in[f]) ? in[f] : 0.0;
         }
     }
 
@@ -635,10 +653,35 @@ private:
             done += n;
             if (n == 0) std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
+        if (done < frames && m_seekRequest.load(std::memory_order_acquire) < 0) {
+            // Stopped (pause) with samples already decoded: keep them for the
+            // next start, otherwise resume would skip this part of the block.
+            const size_t samples = (frames - done) * m_outChannels;
+            m_pending.assign(data + done * m_outChannels, data + done * m_outChannels + samples);
+            m_pendingFrames = frames - done;
+        }
+    }
+
+    /** Writes what a pause left behind. True when nothing is pending any more. */
+    bool flushPending() {
+        size_t done = 0;
+        while (done < m_pendingFrames && !stopRequested() && m_seekRequest.load(std::memory_order_acquire) < 0) {
+            const size_t n = m_output->write(m_pending.data() + done * m_outChannels, m_pendingFrames - done);
+            done += n;
+            if (n == 0) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        if (done > 0) {
+            m_pending.erase(m_pending.begin(), m_pending.begin() + static_cast<std::ptrdiff_t>(done * m_outChannels));
+            m_pendingFrames -= done;
+        }
+        return m_pendingFrames == 0;
     }
 
     /** Same-format next track: swap decoders without touching the output. */
     bool switchToNextGapless(uint64_t boundaryOut) {
+        // One look-ahead switch at a time: the previous decoder must stay
+        // until its own boundary has been heard.
+        if (switchPending()) return false;
         std::unique_ptr<decoders::IAudioDecoder> next;
         double gain = 1.0;
         {
@@ -670,6 +713,9 @@ private:
      * player ends. Returns true when playback continues.
      */
     bool finishOrAdvance() {
+        // Drain first and only then take the next track, so clearNext() or a
+        // seek during the drain still cancels a format-change transition.
+        if (!drainOutput()) return false;
         m_prevDecoder.reset();
         std::unique_ptr<decoders::IAudioDecoder> next;
         double gain = 1.0;
@@ -677,13 +723,6 @@ private:
             std::lock_guard<std::mutex> lock(m_nextMutex);
             next = std::move(m_next);
             gain = m_nextGain;
-        }
-        if (!drainOutput()) {
-            if (next) {
-                std::lock_guard<std::mutex> lock(m_nextMutex);
-                if (!m_next) { m_next = std::move(next); m_nextGain = gain; }
-            }
-            return false;
         }
         if (!next) {
             m_output->stop(5);
@@ -697,6 +736,7 @@ private:
         }
         m_decoder = std::move(next);
         m_gainLinear = gain;
+        m_pendingFrames = 0;
         prepareDsp(info.sampleRate, info.channels);
         m_startRampRemaining = 0;
         {
@@ -707,10 +747,11 @@ private:
         return true;
     }
 
-    /** Waits until the device consumed everything written. False if stopped. */
+    /** Waits until the device consumed everything written. False if stopped, seeking or reverting. */
     bool drainOutput() {
         while (!stopRequested()) {
             if (m_seekRequest.load(std::memory_order_acquire) >= 0) return false;
+            if (m_revertNext.load(std::memory_order_acquire) && switchPending()) return false;
             if (m_output->consumedFrames() >= m_output->writtenFrames()) return true;
             std::this_thread::sleep_for(std::chrono::milliseconds(3));
         }
@@ -732,8 +773,12 @@ private:
     std::atomic<bool> m_speedModeDirty{false};
     std::atomic<uint64_t> m_serial{0};
 
+    std::atomic<bool> m_loaded{false};   // a decoder is installed (readable from any thread)
+
     // Decode-thread state.
     std::unique_ptr<decoders::IAudioDecoder> m_decoder;
+    std::vector<double> m_pending;       // decoded, processed, not yet written (pause mid-block)
+    size_t m_pendingFrames = 0;
     uint32_t m_decoderChannels = 0;
     uint32_t m_outChannels = 0;
     double m_gainLinear = 1.0;

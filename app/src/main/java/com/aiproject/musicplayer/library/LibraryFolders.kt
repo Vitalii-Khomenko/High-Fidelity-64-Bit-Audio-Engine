@@ -8,6 +8,11 @@ import android.net.Uri
 object LibraryFolders {
     private const val PREFS = "player_state"
 
+    // Trees opened this process without a persistable grant: readable until restart.
+    private val sessionGrants = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    data class Added(val entry: LibraryFolderEntry, val persisted: Boolean)
+
     fun load(context: Context): List<LibraryFolderEntry> {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (!prefs.contains(LibraryFolderEntry.PREF_KEY)) {
@@ -29,16 +34,22 @@ object LibraryFolders {
             .apply()
     }
 
-    /** Persists read access to a picked tree and returns its entry. */
-    fun add(context: Context, treeUri: Uri): LibraryFolderEntry {
-        try {
+    /**
+     * Persists read access to a picked tree. Some providers only grant access
+     * for this session ([Added.persisted] false): the folder works until the
+     * app restarts and must then be picked again.
+     */
+    fun add(context: Context, treeUri: Uri): Added {
+        val persisted = try {
             context.contentResolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            true
         } catch (_: SecurityException) {
-            // Some providers grant only temporary access; the folder still works this session.
+            false
         }
+        if (!persisted) sessionGrants += treeUri.toString()
         val entry = LibraryFolderEntry(treeUri.toString(), SafTreeScanner.folderNameFromTreeUri(treeUri))
         save(context, LibraryFolderEntry.normalize(load(context) + entry))
-        return entry
+        return Added(entry, persisted)
     }
 
     fun remove(context: Context, entry: LibraryFolderEntry) {
@@ -50,8 +61,9 @@ object LibraryFolders {
     }
 
     fun accessibleUris(context: Context): Set<String> = try {
-        context.contentResolver.persistedUriPermissions.filter { it.isReadPermission }.map { it.uri.toString() }.toSet()
+        context.contentResolver.persistedUriPermissions.filter { it.isReadPermission }.map { it.uri.toString() }.toSet() +
+            synchronized(sessionGrants) { sessionGrants.toSet() }
     } catch (_: Exception) {
-        emptySet()
+        synchronized(sessionGrants) { sessionGrants.toSet() }
     }
 }

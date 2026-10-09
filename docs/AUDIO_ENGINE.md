@@ -89,7 +89,15 @@ Because the decoder runs ~300 ms ahead, it switches before the boundary is
 audible. Until then the finished decoder is kept: a seek in that window applies
 to the track being heard (the next track is rewound and re-queued), and
 `clearNext()` undoes the switch and continues the current track from the
-audible frame.
+audible frame. Only one such look-ahead switch exists at a time: if the next
+track is shorter than the look-ahead, the decode thread waits until the earlier
+boundary is heard before moving on. A format-change transition takes the next
+track only after the output has drained, so it can still be cancelled.
+
+A pause that arrives while a block is being decoded keeps the processed block
+and writes it first on resume. NaN and infinite samples are replaced by silence
+before the EQ (they would otherwise poison its filter state) and again in the
+output callback.
 
 The JNI layer guards the next slot with a generation counter, so a pre-load that
 finishes after `load()` or `clearNext()` is discarded.
@@ -113,7 +121,8 @@ the player reports `Error` instead of appearing to play. A healthy stream that
 was already replaced is left alone.
 
 **Callback state** (ring pointer, scratch buffers, channel count) changes only
-while no stream is open; sample rate and channel count are atomics for readers.
+while no stream is open; sample rate, channel count and the "configured" flag
+are atomics, so queries never wait for a stream being opened or reconnected.
 
 ## Ring buffer (`core/RingBuffer.h`)
 
@@ -209,6 +218,10 @@ heard rather than what was decoded 300 ms earlier.
 | `play()`, `pause()`, `stop()`, `seekTo(ms)` | Transport |
 | `setVolume`, `setSpeed`, `setSpeedMode`, `setEqEnabled`, `setEqBand` | Controls |
 | `state()`, `positionMs()`, `durationMs()`, `format()`, `consumeTrackAdvanced()`, `spectrum()` | Non-blocking queries |
+
+A per-instance lock makes "check the pre-load generation, then publish the
+decoder" atomic with `clearNext()` and `load()`, so a cancelled pre-load can
+never land in the next slot.
 
 Each Kotlin `AudioEngine` owns a native instance addressed by an id
 (`nativeCreate` / `nativeRelease`). A registry mutex only guards the id map;

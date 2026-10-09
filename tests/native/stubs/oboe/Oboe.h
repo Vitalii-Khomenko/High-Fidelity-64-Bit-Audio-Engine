@@ -43,6 +43,8 @@ inline std::atomic<int> openCount{0};
 inline std::mutex captureMutex;
 inline std::vector<float> captured;
 inline std::atomic<bool> capture{false};
+inline std::atomic<int> openDelayMs{0};     // simulates a slow driver
+inline std::atomic<bool> opening{false};
 
 class AudioStream {
 public:
@@ -124,6 +126,9 @@ public:
     AudioStreamBuilder* setDataCallback(AudioStreamDataCallback* c) { m_callback = c; return this; }
     AudioStreamBuilder* setErrorCallback(std::shared_ptr<AudioStreamErrorCallback> c) { m_error = std::move(c); return this; }
     Result openStream(std::shared_ptr<AudioStream>& stream) {
+        opening = true;
+        if (openDelayMs > 0) std::this_thread::sleep_for(std::chrono::milliseconds(openDelayMs.load()));
+        opening = false;
         if (failOpen || m_channels > maxChannels) return Result::ErrorInternal;
         stream = std::make_shared<AudioStream>(m_rate, m_channels, m_callback, m_error);
         lastStream = stream;

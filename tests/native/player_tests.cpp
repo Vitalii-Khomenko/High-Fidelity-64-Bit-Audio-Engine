@@ -6,6 +6,7 @@
 #include "test_util.h"
 
 #include "core/AudioPlayer.h"
+#include "decoders/WavDecoder.h"
 
 using namespace audio_engine;
 using namespace std::chrono_literals;
@@ -238,6 +239,148 @@ void testFailedRestartIsReported() {
     CHECK(p.state() == PlayerState::Playing);
 }
 
+/** Blocks inside its first readFrames() until released. */
+class GateDecoder : public ToneDecoder {
+public:
+    GateDecoder() : ToneDecoder(48000) {}
+    size_t readFrames(core::AudioBuffer& b, size_t n) override {
+        if (!used.exchange(true)) {
+            entered = true;
+            while (!release) std::this_thread::sleep_for(1ms);
+        }
+        return ToneDecoder::readFrames(b, n);
+    }
+    std::atomic<bool> entered{false}, release{false}, used{false};
+};
+
+// Audit A02: a pause that lands while a block is being decoded must not drop it.
+void testPauseDuringReadKeepsBlock() {
+    core::AudioPlayer p;
+    auto decoder = std::make_unique<GateDecoder>();
+    auto* gate = decoder.get();
+    CHECK(p.load(std::move(decoder), 1.0));
+    CHECK(p.play());
+    CHECK(waitFor([&] { return gate->entered.load(); }));
+    std::atomic<bool> pausing{false};
+    std::thread pauser([&] { pausing = true; p.pause(); });
+    CHECK(waitFor([&] { return pausing.load(); }));
+    std::this_thread::sleep_for(30ms);
+    gate->release = true;
+    pauser.join();
+    CHECK(p.play());
+    CHECK(waitFor([&] { return p.state() == PlayerState::Ended; }));
+    CHECK_NEAR(p.positionMs(), 1000.0, 0.5);
+}
+
+// Audit A03: the next track is shorter than the look-ahead, so it has already
+// ended while the previous one is still heard.
+void testShortNextTrackLookAhead() {
+    {
+        core::AudioPlayer p;
+        CHECK(p.load(std::make_unique<ToneDecoder>(30000), 1.0));
+        p.setNext(std::make_unique<ToneDecoder>(480), 1.0);
+        CHECK(p.play());
+        CHECK(waitFor([&] { return p.positionMs() > 420.0; }));
+        p.seekToMs(100.0);
+        std::this_thread::sleep_for(30ms);
+        CHECK_NEAR(p.durationMs(), 625.0, 1e-9);  // still A
+        CHECK(p.positionMs() < 300.0);
+        CHECK(waitFor([&] { return p.consumeTrackAdvanced(); }));  // B still follows
+        CHECK_NEAR(p.durationMs(), 10.0, 1e-9);
+        CHECK(waitFor([&] { return p.state() == PlayerState::Ended; }));
+    }
+    {
+        core::AudioPlayer p;
+        CHECK(p.load(std::make_unique<ToneDecoder>(30000, 48000, 2, 0.25), 1.0));
+        p.setNext(std::make_unique<ToneDecoder>(480, 48000, 2, 0.125), 1.0);
+        startCapture();
+        CHECK(p.play());
+        CHECK(waitFor([&] { return p.positionMs() > 420.0; }));
+        p.clearNext();
+        CHECK(waitFor([&] { return p.state() == PlayerState::Ended; }));
+        oboe::capture = false;
+        CHECK(countLevel(takeCapture(), 0.125f) < 16);  // B was never heard
+        CHECK(!p.consumeTrackAdvanced());
+    }
+}
+
+// Audit A04: clearing a next track of another format while the output drains.
+void testClearDuringFormatChangeDrain() {
+    core::AudioPlayer p;
+    CHECK(p.load(std::make_unique<ToneDecoder>(9600), 1.0));
+    p.setNext(std::make_unique<ToneDecoder>(8820, 44100, 1), 1.0);
+    CHECK(p.play());
+    std::this_thread::sleep_for(60ms);   // all of A is queued; the engine is draining
+    oboe::suspendCallbacks = true;
+    std::this_thread::sleep_for(30ms);
+    p.clearNext();
+    oboe::suspendCallbacks = false;
+    CHECK(waitFor([&] { return p.state() == PlayerState::Ended; }));
+    CHECK(p.trackInfo().sampleRate == 48000);
+    CHECK(p.outputSampleRate() == 48000);
+}
+
+// Audit A07: format queries must not wait for a slow stream open.
+void testQueriesDoNotWaitForStreamOpen() {
+    core::AudioPlayer p;
+    CHECK(p.load(std::make_unique<ToneDecoder>(48000), 1.0));
+    oboe::openDelayMs = 300;
+    std::thread loader([&] { CHECK(p.load(std::make_unique<ToneDecoder>(44100, 44100), 1.0)); });
+    CHECK(waitFor([&] { return oboe::opening.load(); }));
+    const auto start = std::chrono::steady_clock::now();
+    p.outputSampleRate();
+    p.outputChannels();
+    p.positionMs();
+    p.trackInfo();
+    float bands[32];
+    p.spectrum(bands, 32);
+    const auto waited = std::chrono::steady_clock::now() - start;
+    loader.join();
+    oboe::openDelayMs = 0;
+    CHECK(waited < 50ms);
+}
+
+// Audit A08: NaN/Inf in a float WAV must not reach the device or the DSP state.
+void testNonFiniteSamplesAreSilenced(const std::string& dir) {
+    const std::string path = dir + "/nonfinite.wav";
+    drwav_data_format fmt{};
+    fmt.container = drwav_container_riff;
+    fmt.format = DR_WAVE_FORMAT_IEEE_FLOAT;
+    fmt.channels = 2;
+    fmt.sampleRate = 48000;
+    fmt.bitsPerSample = 64;
+    drwav writer{};
+    CHECK(drwav_init_file_write(&writer, path.c_str(), &fmt, nullptr));
+    std::vector<double> samples(4800 * 2);
+    for (size_t i = 0; i < samples.size(); ++i) {
+        samples[i] = i % 3 == 0 ? NAN : (i % 3 == 1 ? INFINITY : -INFINITY);
+    }
+    CHECK(drwav_write_pcm_frames(&writer, 4800, samples.data()) == 4800);
+    drwav_uninit(&writer);
+
+    core::AudioPlayer p;
+    p.setEqEnabled(true);
+    p.setEqBandGain(1, 6.0);
+    auto decoder = std::make_unique<decoders::WavDecoder>();
+    CHECK(decoder->open(path));
+    CHECK(p.load(std::move(decoder), 1.0));
+    p.setNext(std::make_unique<ToneDecoder>(4800, 48000, 2, 0.25), 1.0);  // a normal track after it
+    startCapture();
+    CHECK(p.play());
+    CHECK(waitFor([&] { return p.state() == PlayerState::Ended; }));
+    oboe::capture = false;
+    const auto out = takeCapture();
+    size_t invalid = 0;
+    for (float v : out) if (!std::isfinite(v)) ++invalid;
+    CHECK(invalid == 0);
+    // The following track plays normally: the EQ state was not poisoned
+    // (0.25 through the -6 dB automatic preamp of the +6 dB band = 0.1253).
+    size_t audible = 0;
+    for (size_t i = 0; i < out.size(); i += 2) if (std::fabs(out[i] - 0.1253f) < 0.001f) ++audible;
+    CHECK(audible > 3000);
+    std::remove(path.c_str());
+}
+
 void testFormatChangeTransition() {
     core::AudioPlayer p;
     CHECK(p.load(std::make_unique<ToneDecoder>(4800, 48000, 2), 1.0));
@@ -376,6 +519,22 @@ void testConcurrentControl() {
     reader.join();
 }
 
+// Audit A01: play() racing the decode thread's gapless switch.
+void testPlayDuringGaplessSwitch() {
+    core::AudioPlayer p;
+    CHECK(p.load(std::make_unique<ToneDecoder>(4800), 1.0));
+    std::atomic<bool> done{false};
+    std::thread controls([&] { while (!done.load()) { p.play(); p.seekToMs(10.0); } });
+    for (int i = 0; i < 100; ++i) {
+        CHECK(p.load(std::make_unique<ToneDecoder>(4800), 1.0));
+        p.setNext(std::make_unique<ToneDecoder>(2400), 1.0);
+        p.play();
+        std::this_thread::sleep_for(5ms);
+    }
+    done = true;
+    controls.join();
+}
+
 void testDestroyWhilePlaying() {
     for (int i = 0; i < 10; ++i) {
         core::AudioPlayer p;
@@ -398,6 +557,11 @@ int main() {
     testSeekDuringGaplessLookAhead();
     testClearNextDuringGaplessLookAhead();
     testFormatChangeTransition();
+    testPauseDuringReadKeepsBlock();
+    testShortNextTrackLookAhead();
+    testClearDuringFormatChangeDrain();
+    testQueriesDoNotWaitForStreamOpen();
+    testNonFiniteSamplesAreSilenced("/tmp");
     testMultichannelFallback();
     testOutputFailure();
     testReconnect();
@@ -406,9 +570,10 @@ int main() {
     testSpeed();
     testSpectrum();
     testConcurrentControl();
+    testPlayDuringGaplessSwitch();
     testDestroyWhilePlaying();
     std::puts("Player tests passed: end/drain, sample-exact pause/resume, immediate volume, seek, gapless, "
               "seek/clear during gapless look-ahead, format change, downmix fallback, output failure, reconnect, "
-              "failed restart, limiter+EQ, speed, spectrum, concurrency.");
+              "failed restart, limiter+EQ, speed, spectrum, concurrency, audit A01-A04/A07/A08 regressions.");
     return 0;
 }

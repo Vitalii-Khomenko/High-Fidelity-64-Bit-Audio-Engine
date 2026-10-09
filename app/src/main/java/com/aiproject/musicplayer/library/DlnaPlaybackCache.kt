@@ -26,12 +26,15 @@ object DlnaPlaybackCache {
 
         return downloadMutex.withLock { withContext(Dispatchers.IO) {
             cacheDir.mkdirs()
-            pruneCache(cacheDir)
             val cacheFile = cacheFile(cacheDir, trackUri)
+            // Check for a hit before pruning, so a large cached track is not
+            // deleted and downloaded again.
             if (cacheFile.exists() && cacheFile.length() > 0L) {
                 cacheFile.setLastModified(System.currentTimeMillis())
+                pruneCache(cacheDir, keep = cacheFile)
                 return@withContext Uri.fromFile(cacheFile)
             }
+            pruneCache(cacheDir, keep = null)
 
             val tmpFile = tempFile(cacheDir, trackUri)
             tmpFile.delete()
@@ -49,6 +52,8 @@ object DlnaPlaybackCache {
                 }
                 val expectedBytes = connection.contentLengthLong
                 require(expectedBytes <= MAX_DOWNLOAD_BYTES) { "DLNA track exceeds 2 GiB download limit" }
+                // Make room up front when the size is known.
+                if (expectedBytes > 0) pruneCache(cacheDir, keep = null, budget = MAX_CACHE_BYTES - expectedBytes)
                 var receivedBytes = 0L
                 connection.inputStream.use { input ->
                     tmpFile.outputStream().use { output ->
@@ -70,6 +75,9 @@ object DlnaPlaybackCache {
                     tmpFile.copyTo(cacheFile, overwrite = true)
                     tmpFile.delete()
                 }
+                // Back within budget; the new track itself is always kept (even
+                // a single file larger than the budget is needed for playback).
+                pruneCache(cacheDir, keep = cacheFile)
                 Uri.fromFile(cacheFile)
             } catch (e: Exception) {
                 tmpFile.delete()
@@ -89,7 +97,8 @@ object DlnaPlaybackCache {
     private fun tempFile(cacheDir: File, trackUri: Uri): File =
         File(cacheDir, "${CACHE_PREFIX}${sha256(trackUri.toString())}$TEMP_EXT")
 
-    private fun pruneCache(cacheDir: File) {
+    /** Removes stale temp files, expired entries and least-recently used tracks over [budget], never [keep]. */
+    private fun pruneCache(cacheDir: File, keep: File?, budget: Long = MAX_CACHE_BYTES) {
         val now = System.currentTimeMillis()
         val allFiles = cacheDir.listFiles { file ->
             file.isFile && file.name.startsWith(CACHE_PREFIX)
@@ -100,20 +109,19 @@ object DlnaPlaybackCache {
             .forEach { it.delete() }
 
         allFiles
-            .filter { it.name.endsWith(CACHE_EXT) && now - it.lastModified() > MAX_CACHE_AGE_MS }
+            .filter { it.name.endsWith(CACHE_EXT) && it != keep && now - it.lastModified() > MAX_CACHE_AGE_MS }
             .forEach { it.delete() }
 
         val audioFiles = cacheDir.listFiles { file ->
             file.isFile && file.name.startsWith(CACHE_PREFIX) && file.name.endsWith(CACHE_EXT)
-        }?.sortedByDescending { it.lastModified() }.orEmpty()
+        }?.sortedBy { it.lastModified() }.orEmpty()   // oldest first
 
         var totalBytes = audioFiles.sumOf { it.length() }
-        if (totalBytes <= MAX_CACHE_BYTES) return
-
-        audioFiles.asReversed().forEach { file ->
-            if (totalBytes <= MAX_CACHE_BYTES) return
-            totalBytes -= file.length()
-            file.delete()
+        for (file in audioFiles) {
+            if (totalBytes <= budget) return
+            if (file == keep) continue
+            val size = file.length()
+            if (file.delete()) totalBytes -= size  // only count what was really freed
         }
     }
 

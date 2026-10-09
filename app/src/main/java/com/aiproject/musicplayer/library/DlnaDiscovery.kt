@@ -5,6 +5,8 @@ import android.net.wifi.WifiManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.io.OutputStreamWriter
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -18,6 +20,9 @@ object DlnaDiscovery {
     private const val SSDP_ADDR = "239.255.255.250"
     private const val SSDP_PORT = 1900
     private const val MAX_ITEMS = 5000
+    private const val MAX_PAGES = 100
+    private const val MAX_DESCRIPTION_BYTES = 1L shl 20    // device description XML
+    private const val MAX_SOAP_BYTES = 8L shl 20           // one Browse response
 
     suspend fun discoverServers(context: Context, timeoutMs: Int = 4000): List<DlnaServer> = withContext(Dispatchers.IO) {
         val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
@@ -68,7 +73,8 @@ object DlnaDiscovery {
         val tracks = mutableListOf<DlnaTrack>()
         var start = 0
         var total = Int.MAX_VALUE
-        while (start < total && start < MAX_ITEMS) {
+        var pages = 0
+        while (start < total && start < MAX_ITEMS && pages++ < MAX_PAGES) {
             ensureActive()
             val page = DlnaProtocol.parseBrowsePage(post(server.controlUrl, DlnaProtocol.buildBrowseEnvelope(objectId, start)))
             containers += page.containers
@@ -93,10 +99,30 @@ object DlnaDiscovery {
             OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { it.write(body) }
             val code = connection.responseCode
             if (code !in 200..299) throw IllegalStateException("Server replied HTTP $code")
-            connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            readLimited(connection, MAX_SOAP_BYTES)
         } finally {
             connection.disconnect()
         }
+    }
+
+    /**
+     * Reads at most [limit] bytes; a larger (or larger-announced) body is an
+     * error, so a broken or hostile server cannot exhaust the heap.
+     */
+    private fun readLimited(connection: HttpURLConnection, limit: Long): String {
+        val announced = connection.contentLengthLong
+        if (announced > limit) throw IOException("Response too large ($announced bytes)")
+        val out = ByteArrayOutputStream()
+        connection.inputStream.use { input ->
+            val buffer = ByteArray(16 * 1024)
+            while (true) {
+                val n = input.read(buffer)
+                if (n < 0) break
+                if (out.size() + n > limit) throw IOException("Response larger than $limit bytes")
+                out.write(buffer, 0, n)
+            }
+        }
+        return out.toString(Charsets.UTF_8.name())
     }
 
     private fun fetchText(url: String): String {
@@ -105,7 +131,7 @@ object DlnaDiscovery {
             readTimeout = 10_000
         }
         return try {
-            connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            readLimited(connection, MAX_DESCRIPTION_BYTES)
         } finally {
             connection.disconnect()
         }

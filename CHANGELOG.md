@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.2 — 2026-10-09
+
+Fixes for the code audit of 0.9.1 (IDs from `AUDIT_CODE_2026-10-09.md`).
+
+### Engine
+
+- **A01** `play()` / `seekToMs()` no longer read the decoder owned by the decode thread (data race found by TSan); an atomic "loaded" flag is used instead.
+- **A02** A pause that lands while a block is being decoded keeps the processed block and writes it on resume — no 21 ms gap.
+- **A03** A next track shorter than the look-ahead: the previous decoder is kept until its boundary is heard, and only one look-ahead switch happens at a time, so seeks and `clearNext()` still apply to the audible track.
+- **A04** For a format-change transition the next track is taken only after the output drained; clearing it during the drain now cancels the transition.
+- **A05** Pre-loads: the JNI generation check and publishing the decoder happen under one lock with `clearNext()` / `load()`; the service invalidates an in-flight pre-load (not only a finished one) and verifies the track by URI.
+- **A07** Format and spectrum queries no longer wait for a stream being opened (lock-free "configured" flag).
+- **A08** NaN/Inf samples (e.g. a damaged float WAV) become silence before the DSP, with a final guard in the output callback; finite over-full-scale samples are kept.
+
+### App
+
+- **A06** Foreground promotion before requesting audio focus (Android 15+ refuses focus to background services); a started command keeps the service foreground until it is handled.
+- **A09** DLNA picks the first resource the engine can decode (by extension, else by the `protocolInfo` MIME); items with only unsupported resources are skipped.
+- **A10** DLNA responses are size-limited (1 MiB description, 8 MiB per Browse page, 100 pages).
+- **A11** DLNA cache: hit checked before pruning, room made before and after a download, the playing file is never pruned, only really deleted files are counted.
+- **A12** Selecting a track without playing ends playback cleanly (focus, foreground, state).
+- **A13** Folders with a session-only SAF grant are usable until restart and the user is told so.
+- Concurrent library scans keep the progress indicator until the last one finishes; playlist database errors show a message instead of failing silently.
+
 ## 0.9.1 — 2026-10-09
 
 ### Fixed

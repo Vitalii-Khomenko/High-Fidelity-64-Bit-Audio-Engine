@@ -130,10 +130,8 @@ public:
         }
     }
 
-    bool isConfigured() const {
-        std::lock_guard<std::mutex> lock(m_streamMutex);
-        return m_configured;
-    }
+    /** Lock-free: queries from the UI must not wait for a stream being opened. */
+    bool isConfigured() const { return m_configured.load(std::memory_order_acquire); }
     bool isRunRequested() const { return m_runRequested.load(std::memory_order_acquire); }
     /** True when a lost device could not be reopened; cleared by the next successful open. */
     bool hasFailed() const { return m_failed.load(std::memory_order_acquire); }
@@ -231,6 +229,7 @@ public:
                 double mono = 0.0;
                 double peak = 0.0;
                 for (size_t c = 0; c < ch; ++c) {
+                    if (!std::isfinite(s[c])) s[c] = 0.0;  // last line of defence for the device
                     mono += s[c];
                     s[c] *= g;
                     peak = std::max(peak, std::fabs(s[c]));
@@ -423,7 +422,7 @@ private:
     // Stream ownership (control threads, guarded by m_streamMutex).
     mutable std::mutex m_streamMutex;
     std::shared_ptr<oboe::AudioStream> m_stream;
-    bool m_configured = false;
+    std::atomic<bool> m_configured{false};
     bool m_started = false;
     // Written under m_streamMutex while no stream runs; read from any thread.
     std::atomic<uint32_t> m_sampleRate{48000};

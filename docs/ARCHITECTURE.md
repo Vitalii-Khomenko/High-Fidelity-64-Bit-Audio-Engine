@@ -53,6 +53,12 @@ it, renders `state` / `position` and calls `PlayerCommands`.
 - **Loading** — DLNA URLs are downloaded to the cache first
   (`DlnaPlaybackCache`); everything else opens through the content resolver and
   the descriptor is handed to native code.
+- **Pre-load cancellation** — cancelling the coroutine cannot stop a JNI
+  open in progress, so invalidation always calls `clearNext()` (the native
+  generation discards a late result) and a finished pre-load is accepted only
+  if its URI is still the next track.
+- **Foreground before focus** — the service promotes itself before requesting
+  audio focus; Android 15+ grants focus only to foreground apps and services.
 - **Audio focus** — `AudioFocusPolicy` (pure Kotlin): transient loss pauses and
   resumes on gain, permanent loss pauses for good, duck lowers the volume. A
   user action cancels any pending resume. Unplugging headphones pauses.

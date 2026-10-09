@@ -100,6 +100,7 @@ class PlaybackService : Service(), PlayerCommands {
     private var loadedUri: String? = null        // track currently loaded in the engine
     private var pendingStartMs = 0L              // where the next load starts
     private var preloadedUri: String? = null     // queued in the engine for gapless
+    private var preloadTargetUri: String? = null // being opened by preloadJob
     // Last queued track, kept after invalidation: if the engine had already
     // switched to it audibly, the gapless event still names the right track.
     private var lastPreloadedUri: String? = null
@@ -116,6 +117,7 @@ class PlaybackService : Service(), PlayerCommands {
     private var isForeground = false
     private var lastBookmarkSave = 0L
     private var importing: String? = null
+    private var activeImports = 0
 
     private val noisyReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -154,14 +156,14 @@ class PlaybackService : Service(), PlayerCommands {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Started with startForegroundService(): promote at once, as required.
-        if (!isForeground) {
-            promoteToForeground()
-            if (!wantPlaying) leaveForeground(removeNotification = false)
-        }
+        // Stay foreground while the command (e.g. a media button "play") is
+        // handled: on Android 15+ audio focus is only granted to a foreground app.
+        if (!isForeground) promoteToForeground()
         when (intent?.action) {
             ACTION_STOP -> stop()
             else -> MediaButtonReceiver.handleIntent(session, intent)
         }
+        if (!wantPlaying && loadJob?.isActive != true && isForeground) leaveForeground(removeNotification = false)
         return START_NOT_STICKY
     }
 
@@ -287,9 +289,13 @@ class PlaybackService : Service(), PlayerCommands {
             (engineState == AudioEngine.State.PAUSED || engineState == AudioEngine.State.PLAYING)
         ) {
             // PLAYING here means a pause is still queued: play() lands after it.
-            if (!requestFocus()) return
-            wantPlaying = true
+            // Foreground first: Android 15+ refuses focus to a background service.
             enterForeground()
+            if (!requestFocus()) {
+                leaveForeground(removeNotification = false)
+                return
+            }
+            wantPlaying = true
             publish()
             pendingTransport++
             scope.launch {
@@ -447,6 +453,7 @@ class PlaybackService : Service(), PlayerCommands {
     /** Scans on IO in the service scope (sorted), then hands the result to [onDone] on the main thread. */
     private fun runImport(label: String, scan: () -> List<Track>, onDone: (List<Track>) -> Unit) {
         importing = label
+        activeImports++
         publish()
         scope.launch {
             val tracks = try {
@@ -456,7 +463,8 @@ class PlaybackService : Service(), PlayerCommands {
             } catch (_: Exception) {
                 emptyList()
             }
-            importing = null
+            // Another scan may still be running; keep its indicator.
+            if (--activeImports == 0) importing = null
             onDone(tracks)
             publish()
         }
@@ -491,13 +499,14 @@ class PlaybackService : Service(), PlayerCommands {
         _position.value = PlaybackPosition(startMs, track.durationMs)
         publish(loading = true)
         saveQueuePosition()
+        enterForeground()  // before focus: Android 15+ grants focus only to foreground apps
         if (!requestFocus()) {
             wantPlaying = false
             pendingStartMs = startMs
             publish()
+            leaveForeground(removeNotification = false)
             return
         }
-        enterForeground()
         loadJob = scope.launch {
             val ok = try {
                 val playable = withContext(Dispatchers.IO) {
@@ -530,6 +539,12 @@ class PlaybackService : Service(), PlayerCommands {
     private fun selectCurrent() {
         loadJob?.cancel()
         invalidatePreload()
+        if (wantPlaying) {
+            // Selecting without playing ends playback: release focus and the foreground state.
+            wantPlaying = false
+            abandonFocus()
+            leaveForeground(removeNotification = false)
+        }
         loadedUri = null
         val track = queue.current
         pendingStartMs = bookmarkFor(track)
@@ -620,6 +635,7 @@ class PlaybackService : Service(), PlayerCommands {
         val nextIndex = queue.peekNext(auto = true)
         val track = queue.tracks.getOrNull(nextIndex) ?: return
         val replayGain = settings.replayGain
+        preloadTargetUri = track.uri
         preloadJob = scope.launch {
             val ok = try {
                 val playable = withContext(Dispatchers.IO) {
@@ -633,17 +649,25 @@ class PlaybackService : Service(), PlayerCommands {
             } catch (_: Exception) {
                 false
             }
-            if (ok && queue.peekNext(auto = true) == nextIndex) {
+            preloadTargetUri = null
+            if (!ok) return@launch
+            if (queue.tracks.getOrNull(queue.peekNext(auto = true))?.uri == track.uri) {
                 preloadedUri = track.uri
                 lastPreloadedUri = track.uri
+            } else {
+                engine.clearNext()  // the queue changed while it was opening
             }
         }
     }
 
     private fun invalidatePreload() {
+        // Cancelling the coroutine cannot interrupt a JNI open already running;
+        // clearNext() bumps the native generation so that open is discarded.
+        val inFlight = preloadJob?.isActive == true
         preloadJob?.cancel()
         preloadJob = null
-        if (preloadedUri != null) engine.clearNext()
+        preloadTargetUri = null
+        if (inFlight || preloadedUri != null) engine.clearNext()
         preloadedUri = null
     }
 
@@ -736,7 +760,11 @@ class PlaybackService : Service(), PlayerCommands {
     private fun queueChanged(saveTracks: Boolean) {
         // A queued next track that is no longer next must not play.
         val nextUri = queue.tracks.getOrNull(queue.peekNext(auto = true))?.uri
-        if (preloadedUri != null && preloadedUri != nextUri) invalidatePreload()
+        if ((preloadedUri != null && preloadedUri != nextUri) ||
+            (preloadJob?.isActive == true && preloadTargetUri != nextUri)
+        ) {
+            invalidatePreload()
+        }
         if (saveTracks) store.saveTracks(queue.tracks)
         saveQueuePosition()
         publish()
@@ -1000,8 +1028,8 @@ class PlaybackService : Service(), PlayerCommands {
             // The started state keeps the service alive after the UI unbinds.
             ContextCompat.startForegroundService(this, Intent(this, PlaybackService::class.java))
         } catch (_: Exception) {
-            // Background start not allowed (Android 12+): keep playing while bound.
-            return
+            // Not allowed from the background (Android 12+); if the service is
+            // already started (paused notification) promotion below still works.
         }
         promoteToForeground()
     }
