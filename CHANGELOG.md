@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.15.0 — 2026-10-09
+
+- **Lyrics**: a *Lyrics* panel on the player. Synced LRC (several time tags per line, `[offset:]`, word timings) follows the position and highlights the current line; plain lyrics scroll. Taken from `<name>.lrc` next to the file, else from the tags (`USLT`, `LYRICS`, `©lyr`); UTF-8 and Windows-1251 files.
+- **Home-screen widget**: cover, title, artist and previous / play-pause / next, working with the app closed.
+- Screenshots in the README show the current interface (covers, albums, parametric EQ).
+- Roadmap rewritten for the current state.
+
 ## 0.14.0 — 2026-10-09
 
 ### DLNA

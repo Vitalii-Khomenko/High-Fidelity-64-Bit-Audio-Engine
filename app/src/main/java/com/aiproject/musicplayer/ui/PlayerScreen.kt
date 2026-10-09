@@ -51,6 +51,15 @@ import com.aiproject.musicplayer.playback.RepeatMode
 import com.aiproject.musicplayer.playback.SortMode
 import com.aiproject.musicplayer.playback.TimeFormat
 import com.aiproject.musicplayer.playback.Track
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.platform.LocalInspectionMode
+import com.aiproject.musicplayer.library.Lyrics
+import com.aiproject.musicplayer.library.LyricsLoader
 import com.aiproject.musicplayer.ui.components.AwButton
 import com.aiproject.musicplayer.ui.components.Cover
 import com.aiproject.musicplayer.ui.components.EmptyNote
@@ -188,6 +197,7 @@ private fun NowPlaying(state: PlayerState, position: PlaybackPosition, commands:
     val aw = Aw.colors
     val track = state.current
     val output = rememberOutputInfo()
+    var showLyrics by rememberSaveable { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(top = 12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Eyebrow(
@@ -259,6 +269,48 @@ private fun NowPlaying(state: PlayerState, position: PlaybackPosition, commands:
                 stringResource(if (state.settings.eq.enabled) R.string.eq_on else R.string.eq_off),
                 onOpenSound, Modifier.weight(1f), tone = if (state.settings.eq.enabled) aw.amber else null,
             )
+            AwButton(stringResource(R.string.lyrics), { showLyrics = !showLyrics }, Modifier.weight(1f), tone = if (showLyrics) aw.cyan else null)
+        }
+        if (showLyrics) {
+            Spacer(Modifier.height(12.dp))
+            LyricsPanel(track, position)
+        }
+    }
+}
+
+@Composable
+private fun LyricsPanel(track: Track?, position: PlaybackPosition) {
+    val aw = Aw.colors
+    val context = LocalContext.current
+    val preview = LocalInspectionMode.current
+    val lyrics by produceState<Lyrics?>(null, track?.uri) {
+        value = if (preview || track == null) null else runCatching { LyricsLoader.load(context, track.uri) }.getOrNull()
+    }
+    Box(Modifier.fillMaxWidth().border(1.dp, aw.line).padding(horizontal = 14.dp, vertical = 10.dp)) {
+        when (val l = lyrics) {
+            null -> Text(stringResource(R.string.no_lyrics), style = Aw.small, color = aw.muted)
+            is Lyrics.Plain -> Column(Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+                Text(l.text, style = Aw.body, color = aw.text)
+            }
+            is Lyrics.Synced -> {
+                val current = l.indexAt(position.positionMs)
+                val list = rememberLazyListState()
+                LaunchedEffect(current) { if (current >= 0) list.animateScrollToItem((current - 2).coerceAtLeast(0)) }
+                LazyColumn(Modifier.fillMaxWidth().height(240.dp), state = list) {
+                    itemsIndexed(l.lines) { i, line ->
+                        Text(
+                            line.text.ifEmpty { "♪" },
+                            style = if (i == current) Aw.bodyStrong else Aw.body,
+                            color = when {
+                                i == current -> aw.cyan
+                                i < current -> aw.muted
+                                else -> aw.text
+                            },
+                            modifier = Modifier.padding(vertical = 3.dp),
+                        )
+                    }
+                }
+            }
         }
     }
 }

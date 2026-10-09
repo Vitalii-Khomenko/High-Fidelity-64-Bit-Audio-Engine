@@ -179,4 +179,8 @@
     <string name="renderer_visible">Виден как %1$s</string>
     <string name="renderer_no_network">Нет сети Wi-Fi: рендерер не запустился</string>
     <string name="renderer_folder">DLNA</string>
+    <string name="lyrics">Текст</string>
+    <string name="no_lyrics">Текста нет: положите рядом с треком файл .lrc с тем же именем или добавьте текст в теги.</string>
+    <string name="widget_name">HiFi Player</string>
+    <string name="widget_description">Обложка, название и кнопки управления</string>
 </resources>

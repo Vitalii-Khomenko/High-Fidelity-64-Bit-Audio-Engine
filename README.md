@@ -38,9 +38,10 @@ Details: [docs/AUDIO_ENGINE.md](docs/AUDIO_ENGINE.md).
 
 ## The app
 
-- **Player** — cover, title, artist and album, format chips (codec, rate, bits, DSD, ReplayGain, output), a pixel spectrum of what is actually being heard, transport, shuffle / repeat, and the queue.
+- **Player** — cover, title, artist and album, synced lyrics (`.lrc` next to the file or in the tags), format chips (codec, rate, bits, DSD, ReplayGain, output), a pixel spectrum of what is actually being heard, transport, shuffle / repeat, and the queue.
 - **Library** — **albums** (cover grid) and **artists** built from the tags of your folders, with search; **sources**: folders through the Storage Access Framework (with a folder browser and CUE sheets), a device scan (MediaStore), DLNA / UPnP servers with folder navigation (FLAC, WAV, WavPack and TTA start playing while they download), and saved playlists.
 - **Sound** — volume, speed and time-stretch profile, EQ (5 bands or parametric with AutoEQ), crossfeed, ReplayGain mode, loudness measurement, true-peak limiter.
+- **Widget** — home-screen player with cover and transport buttons.
 - **DLNA renderer** — optional: the phone shows up on the Wi-Fi as a player (UPnP MediaRenderer) that BubbleUPnP, foobar2000, Windows "Cast to device" or Kodi can send music to, with gapless next track, seek, volume and state events.
 - **Settings** — theme (system / dark / light), *Music* or *Books* listening mode (Books keeps a bookmark per file and marks finished chapters), sleep timer with a 30-second fade, and the signal path from file to device.
 

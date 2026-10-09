@@ -70,6 +70,19 @@
             android:exported="true"
             tools:ignore="ExportedContentProvider" />
 
+        <!-- Home-screen player widget. -->
+        <receiver
+            android:name=".PlayerWidget"
+            android:exported="true"
+            android:label="@string/widget_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_player_info" />
+        </receiver>
+
         <!-- Headset, Bluetooth and notification media buttons. -->
         <receiver
             android:name="androidx.media.session.MediaButtonReceiver"

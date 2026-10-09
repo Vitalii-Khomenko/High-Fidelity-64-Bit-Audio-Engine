@@ -148,6 +148,18 @@ next URI becomes the queue's next track (gapless), *Stop* stops without
 shutting the service down, volume is the engine volume. It runs while the
 service exists (app open or playing).
 
+## Lyrics and widget
+
+`LyricsLoader` looks for `<name>.lrc` (or `.txt`) next to the file in
+path-style document trees, then for lyrics in the tags (`USLT`, `LYRICS`,
+`©lyr`); `LrcParser` turns LRC into timed lines (several time tags per line,
+`[offset:]`, word timings removed) or keeps plain text. The player shows them
+in a panel that follows the position.
+
+`PlayerWidget` (home screen) shows the cover, title and artist with previous /
+play-pause / next. The buttons are media-button intents, so they work with the
+app closed; the service pushes a new state only when something visible changed.
+
 ## Persistence
 
 | Where | What |

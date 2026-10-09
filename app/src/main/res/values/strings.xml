@@ -176,4 +176,8 @@
     <string name="renderer_visible">Visible as %1$s</string>
     <string name="renderer_no_network">No Wi-Fi network: the renderer could not start</string>
     <string name="renderer_folder">DLNA</string>
+    <string name="lyrics">Lyrics</string>
+    <string name="no_lyrics">No lyrics: put a .lrc file with the same name next to the track, or add lyrics to its tags.</string>
+    <string name="widget_name">HiFi Player</string>
+    <string name="widget_description">Cover, title and transport buttons</string>
 </resources>

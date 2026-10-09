@@ -162,6 +162,9 @@ fun LibraryScreen(state: PlayerState, commands: PlayerCommands, onPlayed: () -> 
 @Composable
 private fun aw() = Aw.colors
 
+/** Albums and artists shown by previews and screenshots (there is no database there). */
+val LocalLibraryPreview = androidx.compose.runtime.staticCompositionLocalOf<Pair<List<AlbumRow>, List<ArtistRow>>?> { null }
+
 // ── Albums and artists ──────────────────────────────────────────────────────
 
 @Composable
@@ -182,8 +185,9 @@ private fun CollectionHome(
 ) {
     val aw = Aw.colors
     val index = rememberLibraryIndex()
-    val albums by remember(index) { index?.albums() ?: flowOf(emptyList()) }.collectAsState(initial = emptyList())
-    val artists by remember(index) { index?.artists() ?: flowOf(emptyList()) }.collectAsState(initial = emptyList())
+    val sample = LocalLibraryPreview.current
+    val albums by remember(index) { index?.albums() ?: flowOf(sample?.first.orEmpty()) }.collectAsState(initial = sample?.first.orEmpty())
+    val artists by remember(index) { index?.artists() ?: flowOf(sample?.second.orEmpty()) }.collectAsState(initial = sample?.second.orEmpty())
     var query by rememberSaveable { mutableStateOf("") }
     var found by remember { mutableStateOf<List<Track>>(emptyList()) }
     LaunchedEffect(query, index) {

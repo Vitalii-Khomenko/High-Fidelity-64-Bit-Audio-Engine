@@ -91,7 +91,7 @@ Queue and shuffle logic (`PlaybackQueueTest`), audio focus policy, supported
 formats and sorting (including album order), CUE sheets (timing, pregaps,
 one file per track, code pages) and range URIs, the native tag record, library
 grouping keys and search patterns, AutoEQ / Equalizer APO parsing, the AutoEQ index and
-profile URLs, EQ profile storage, R128 → ReplayGain maths, the DLNA renderer (SOAP actions, faults, state
+profile URLs, EQ profile storage, R128 → ReplayGain maths, LRC lyrics (offsets, repeated and word time tags, plain text), the DLNA renderer (SOAP actions, faults, state
 queries, volume, time / DIDL / SSDP / LastChange formats, and an end-to-end
 run over real sockets: description, SOAP Play, SUBSCRIBE and NOTIFY), media ids (incl. albums / artists), DLNA protocol (paging, containers, XML hardening), EQ
 settings, speed clamping, DSD labels, library folder serialisation.
@@ -146,6 +146,7 @@ Before treating a build as stable, check:
 5. Headphones and Bluetooth: unplug (pauses), reconnect, switching outputs while playing; a call or voice message and return of focus.
 6. Screen off for 30 minutes; sleep timer; leaving and reopening the app; notification and lock-screen controls with the app closed.
 7. SAF folders, saved playlists, Books bookmarks after a restart, DLNA on your server.
+11. Lyrics: a `.lrc` next to a track and lyrics in tags; the home-screen widget with the app closed.
 10. DLNA: a large FLAC from your server starts before it has downloaded; the renderer with BubbleUPnP (or Windows "Cast to device"): play, pause, seek, volume, next track gapless.
 9. Sound: an AutoEQ profile for your headphones (search, apply, switch back to 5 bands), crossfeed presets with headphones, *Measure library* on a few albums without tags and their level against tagged ones, the limiter with EQ boosts.
 8. Library: first indexing of a large folder (progress, time), albums and artists, search in Cyrillic, covers (embedded and `cover.jpg`), adding a file and *Update library*; lock-screen and notification cover; albums with covers in Android Auto.

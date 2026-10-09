@@ -35,6 +35,7 @@ import androidx.media.MediaBrowserServiceCompat
 import androidx.media.session.MediaButtonReceiver
 import com.aiproject.musicplayer.AudioEngine
 import com.aiproject.musicplayer.MainActivity
+import com.aiproject.musicplayer.PlayerWidget
 import com.aiproject.musicplayer.R
 import com.aiproject.musicplayer.dlna.RendererHost
 import com.aiproject.musicplayer.dlna.RendererProtocol
@@ -1313,6 +1314,8 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         if (::browseTree.isInitialized) publishSessionQueue()
         updateSessionState()
         updateRendererStatus()
+        val track = queue.current
+        PlayerWidget.update(this, track?.title, track?.artist?.ifBlank { track.folder }, wantPlaying, art?.takeIf { artUri == track?.uri })
     }
 
     private fun applyVolume() {
@@ -1459,7 +1462,10 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
             if (artUri != uri) return@launch
             art = bitmap
             artJob = null
-            if (bitmap != null) updateSessionMetadata()
+            if (bitmap != null) {
+                updateSessionMetadata()
+                publish()
+            }
         }
     }
 
