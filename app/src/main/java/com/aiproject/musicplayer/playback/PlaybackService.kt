@@ -20,6 +20,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.DocumentsContract
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
@@ -32,7 +33,9 @@ import com.aiproject.musicplayer.AudioEngine
 import com.aiproject.musicplayer.MainActivity
 import com.aiproject.musicplayer.R
 import com.aiproject.musicplayer.library.DlnaPlaybackCache
+import com.aiproject.musicplayer.library.MediaStoreScanner
 import com.aiproject.musicplayer.library.PlaylistOrdering
+import com.aiproject.musicplayer.library.SafTreeScanner
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -97,6 +100,9 @@ class PlaybackService : Service(), PlayerCommands {
     private var loadedUri: String? = null        // track currently loaded in the engine
     private var pendingStartMs = 0L              // where the next load starts
     private var preloadedUri: String? = null     // queued in the engine for gapless
+    // Last queued track, kept after invalidation: if the engine had already
+    // switched to it audibly, the gapless event still names the right track.
+    private var lastPreloadedUri: String? = null
     private var loadJob: Job? = null
     private var preloadJob: Job? = null
     private var monitorJob: Job? = null
@@ -109,6 +115,7 @@ class PlaybackService : Service(), PlayerCommands {
     private var pendingTransport = 0             // engine calls queued but not yet run
     private var isForeground = false
     private var lastBookmarkSave = 0L
+    private var importing: String? = null
 
     private val noisyReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -133,7 +140,7 @@ class PlaybackService : Service(), PlayerCommands {
         super.onCreate()
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
         store = PlayerStore(this)
-        engine = AudioEngine().also { it.init() }
+        engine = AudioEngine()
         createNotificationChannel()
         setupSession()
         ContextCompat.registerReceiver(
@@ -415,6 +422,46 @@ class PlaybackService : Service(), PlayerCommands {
         publish()
     }
 
+    // ── Library import ───────────────────────────────────────────────────────
+
+    override fun importFolder(treeUri: String, documentId: String?, label: String, play: Boolean) {
+        runImport(label, scan = {
+            val tree = Uri.parse(treeUri)
+            SafTreeScanner.scanTracks(contentResolver, tree, documentId ?: DocumentsContract.getTreeDocumentId(tree), label)
+        }) { tracks ->
+            when {
+                tracks.isEmpty() -> _messages.tryEmit(getString(R.string.no_tracks_in, label))
+                play -> setQueue(tracks, 0, true)
+                else -> _messages.tryEmit(getString(R.string.added_tracks, addTracks(tracks), label))
+            }
+        }
+    }
+
+    override fun importDeviceLibrary() {
+        val label = getString(R.string.device)
+        runImport(label, scan = { MediaStoreScanner.scan(contentResolver) }) { tracks ->
+            _messages.tryEmit(getString(R.string.added_tracks, addTracks(tracks), label))
+        }
+    }
+
+    /** Scans on IO in the service scope (sorted), then hands the result to [onDone] on the main thread. */
+    private fun runImport(label: String, scan: () -> List<Track>, onDone: (List<Track>) -> Unit) {
+        importing = label
+        publish()
+        scope.launch {
+            val tracks = try {
+                withContext(Dispatchers.IO) { PlaylistOrdering.sortTracks(scan(), settings.sortMode) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                emptyList()
+            }
+            importing = null
+            onDone(tracks)
+            publish()
+        }
+    }
+
     /** Levels for the visualiser (reads native state, never blocks). */
     override fun readSpectrum(bands: FloatArray) = engine.spectrum(bands)
 
@@ -436,6 +483,7 @@ class PlaybackService : Service(), PlayerCommands {
         val track = queue.current ?: return
         idleStopJob?.cancel()
         invalidatePreload()
+        lastPreloadedUri = null
         loadJob?.cancel()
         wantPlaying = true
         loadedUri = null
@@ -517,7 +565,11 @@ class PlaybackService : Service(), PlayerCommands {
             startCurrent(startMs = 0L, auto = true)
             return
         }
+        // A failed open leaves the previous track loaded (and possibly still
+        // playing): silence it so state, session and focus agree.
         wantPlaying = false
+        transport { engine.stop() }
+        abandonFocus()
         publish()
         leaveForeground(removeNotification = false)
     }
@@ -549,8 +601,9 @@ class PlaybackService : Service(), PlayerCommands {
     private fun onGaplessAdvanced() {
         val finished = queue.current
         finished?.let { markFinished(it) }
-        val target = preloadedUri
+        val target = preloadedUri ?: lastPreloadedUri
         preloadedUri = null
+        lastPreloadedUri = null
         queue.advance(auto = true)
         if (target != null && queue.current?.uri != target) {
             val index = queue.tracks.indexOfFirst { it.uri == target }
@@ -580,7 +633,10 @@ class PlaybackService : Service(), PlayerCommands {
             } catch (_: Exception) {
                 false
             }
-            if (ok && queue.peekNext(auto = true) == nextIndex) preloadedUri = track.uri
+            if (ok && queue.peekNext(auto = true) == nextIndex) {
+                preloadedUri = track.uri
+                lastPreloadedUri = track.uri
+            }
         }
     }
 
@@ -750,6 +806,7 @@ class PlaybackService : Service(), PlayerCommands {
             format = if (loadedUri != null) engine.format() else null,
             playedUris = playedUris,
             sleepTimerEndsAt = sleepDeadline,
+            importing = importing,
         )
         updateSessionState()
     }
@@ -786,10 +843,20 @@ class PlaybackService : Service(), PlayerCommands {
             _messages.tryEmit(getString(R.string.error_audio_focus))
             return false
         }
+        // A fresh grant does not call the listener: drop any stale ducking.
+        resetDuck()
         return true
     }
 
+    private fun resetDuck() {
+        if (duckFactor != 1.0) {
+            duckFactor = 1.0
+            applyVolume()
+        }
+    }
+
     private fun abandonFocus() {
+        resetDuck()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             focusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
         } else {

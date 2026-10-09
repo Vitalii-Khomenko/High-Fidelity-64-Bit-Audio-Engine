@@ -30,42 +30,50 @@ class AudioEngine {
 
     enum class State { IDLE, PAUSED, PLAYING, ENDED, ERROR }
 
-    fun init() = nativeInit()
-    fun release() = nativeRelease()
+    // Native instance owned by this object; 0 after release(). Calls on a
+    // released engine are ignored natively.
+    @Volatile
+    private var id: Long = nativeCreate()
+
+    fun release() {
+        val old = id
+        id = 0L
+        nativeRelease(old)
+    }
 
     /** Opens [uri] (content:// or file://) and makes it current, paused at 0. */
     fun load(context: Context, uri: Uri, replayGain: ReplayGainMode): Boolean {
         val fd = openFd(context, uri) ?: return false
-        return nativeLoad(fd, replayGain.id)
+        return nativeLoad(id, fd, replayGain.id)
     }
 
     /** Queues [uri] for a gapless transition after the current track. */
     fun loadNext(context: Context, uri: Uri, replayGain: ReplayGainMode): Boolean {
         val fd = openFd(context, uri) ?: return false
-        return nativeLoadNext(fd, replayGain.id)
+        return nativeLoadNext(id, fd, replayGain.id)
     }
 
-    fun clearNext() = nativeClearNext()
-    fun play(): Boolean = nativePlay()
-    fun pause() = nativePause()
-    fun stop() = nativeStop()
-    fun seekTo(positionMs: Long) = nativeSeekTo(positionMs.toDouble())
-    fun setVolume(volume: Double) = nativeSetVolume(volume)
-    fun setSpeed(speed: Double) = nativeSetSpeed(speed)
-    fun setSpeedMode(mode: Int) = nativeSetSpeedMode(mode)
-    fun setEqEnabled(enabled: Boolean) = nativeSetEqEnabled(enabled)
-    fun setEqBand(band: Int, gainDb: Double) = nativeSetEqBand(band, gainDb)
+    fun clearNext() = nativeClearNext(id)
+    fun play(): Boolean = nativePlay(id)
+    fun pause() = nativePause(id)
+    fun stop() = nativeStop(id)
+    fun seekTo(positionMs: Long) = nativeSeekTo(id, positionMs.toDouble())
+    fun setVolume(volume: Double) = nativeSetVolume(id, volume)
+    fun setSpeed(speed: Double) = nativeSetSpeed(id, speed)
+    fun setSpeedMode(mode: Int) = nativeSetSpeedMode(id, mode)
+    fun setEqEnabled(enabled: Boolean) = nativeSetEqEnabled(id, enabled)
+    fun setEqBand(band: Int, gainDb: Double) = nativeSetEqBand(id, band, gainDb)
 
-    fun state(): State = State.entries.getOrElse(nativeGetState()) { State.ERROR }
-    fun positionMs(): Long = nativeGetPositionMs().toLong()
-    fun durationMs(): Long = nativeGetDurationMs().toLong()
+    fun state(): State = State.entries.getOrElse(nativeGetState(id)) { State.ERROR }
+    fun positionMs(): Long = nativeGetPositionMs(id).toLong()
+    fun durationMs(): Long = nativeGetDurationMs(id).toLong()
 
     /** True once after the audible track switched gaplessly to the queued one. */
-    fun consumeTrackAdvanced(): Boolean = nativeConsumeTrackAdvanced()
+    fun consumeTrackAdvanced(): Boolean = nativeConsumeTrackAdvanced(id)
 
     fun format(): StreamFormat? {
         val v = IntArray(10)
-        nativeGetTrackInfo(v)
+        nativeGetTrackInfo(id, v)
         if (v[0] == 0) return null
         return StreamFormat(
             sampleRate = v[0],
@@ -81,7 +89,7 @@ class AudioEngine {
     }
 
     /** Fills [bands] (up to 64) with 0..1 log-spaced levels of what is being heard. */
-    fun spectrum(bands: FloatArray) = nativeGetSpectrum(bands)
+    fun spectrum(bands: FloatArray) = nativeGetSpectrum(id, bands)
 
     private fun openFd(context: Context, uri: Uri): Int? = try {
         context.contentResolver.openFileDescriptor(uri, "r")?.detachFd()
@@ -89,26 +97,26 @@ class AudioEngine {
         null
     }
 
-    private external fun nativeInit()
-    private external fun nativeRelease()
-    private external fun nativeLoad(fd: Int, replayGainMode: Int): Boolean
-    private external fun nativeLoadNext(fd: Int, replayGainMode: Int): Boolean
-    private external fun nativeClearNext()
-    private external fun nativePlay(): Boolean
-    private external fun nativePause()
-    private external fun nativeStop()
-    private external fun nativeSeekTo(positionMs: Double)
-    private external fun nativeSetVolume(volume: Double)
-    private external fun nativeSetSpeed(speed: Double)
-    private external fun nativeSetSpeedMode(mode: Int)
-    private external fun nativeSetEqEnabled(enabled: Boolean)
-    private external fun nativeSetEqBand(band: Int, gainDb: Double)
-    private external fun nativeGetState(): Int
-    private external fun nativeGetPositionMs(): Double
-    private external fun nativeGetDurationMs(): Double
-    private external fun nativeConsumeTrackAdvanced(): Boolean
-    private external fun nativeGetTrackInfo(out: IntArray)
-    private external fun nativeGetSpectrum(out: FloatArray)
+    private external fun nativeCreate(): Long
+    private external fun nativeRelease(id: Long)
+    private external fun nativeLoad(id: Long, fd: Int, replayGainMode: Int): Boolean
+    private external fun nativeLoadNext(id: Long, fd: Int, replayGainMode: Int): Boolean
+    private external fun nativeClearNext(id: Long)
+    private external fun nativePlay(id: Long): Boolean
+    private external fun nativePause(id: Long)
+    private external fun nativeStop(id: Long)
+    private external fun nativeSeekTo(id: Long, positionMs: Double)
+    private external fun nativeSetVolume(id: Long, volume: Double)
+    private external fun nativeSetSpeed(id: Long, speed: Double)
+    private external fun nativeSetSpeedMode(id: Long, mode: Int)
+    private external fun nativeSetEqEnabled(id: Long, enabled: Boolean)
+    private external fun nativeSetEqBand(id: Long, band: Int, gainDb: Double)
+    private external fun nativeGetState(id: Long): Int
+    private external fun nativeGetPositionMs(id: Long): Double
+    private external fun nativeGetDurationMs(id: Long): Double
+    private external fun nativeConsumeTrackAdvanced(id: Long): Boolean
+    private external fun nativeGetTrackInfo(id: Long, out: IntArray)
+    private external fun nativeGetSpectrum(id: Long, out: FloatArray)
 
     companion object {
         init {

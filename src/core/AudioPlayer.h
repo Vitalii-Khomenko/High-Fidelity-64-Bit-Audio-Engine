@@ -85,7 +85,9 @@ public:
         std::lock_guard<std::mutex> lock(m_control);
         stopDecodeThread();
         if (m_output->isRunRequested()) m_output->stop(kSwitchFadeMs);
-        clearNext();
+        clearNextSlot();
+        m_prevDecoder.reset();
+        m_revertNext.store(false, std::memory_order_release);
 
         const TrackInfo info = makeInfo(*decoder, gainLinear);
         const bool sameFormat = m_output->isConfigured() &&
@@ -121,9 +123,14 @@ public:
         m_nextGain = gainLinear;
     }
 
+    /**
+     * Drops the queued next track. If the decoder already switched to it but
+     * it is not audible yet, the switch is undone and the current track
+     * continues from the audible frame.
+     */
     void clearNext() {
-        std::lock_guard<std::mutex> lock(m_nextMutex);
-        m_next.reset();
+        clearNextSlot();
+        m_revertNext.store(true, std::memory_order_release);
     }
 
     bool hasNext() const {
@@ -167,7 +174,7 @@ public:
         if (m_output->isRunRequested()) m_output->stop(kPauseFadeMs);
         m_seekRequest.store(-1, std::memory_order_release);
         if (m_decoder) {
-            seekLocked(0);
+            seekAudible(0);
             m_state.store(PlayerState::Paused, std::memory_order_release);
         }
     }
@@ -176,8 +183,17 @@ public:
         if (!std::isfinite(ms)) return;
         std::lock_guard<std::mutex> lock(m_control);
         if (!m_decoder) return;
-        const uint32_t sr = m_decoder->getSampleRate();
-        const uint64_t total = m_decoder->getTotalFrames();
+        // Seek within the track being heard. The decoder may already be on the
+        // next track (gapless look-ahead), and it belongs to the decode thread.
+        TrackInfo audible;
+        {
+            std::lock_guard<std::mutex> infoLock(m_infoMutex);
+            promoteLocked();
+            audible = m_current;
+        }
+        const uint32_t sr = audible.sampleRate;
+        const uint64_t total = audible.totalFrames;
+        if (sr == 0) return;
         double frame = std::max(0.0, ms) * sr / 1000.0;
         if (total > 0) frame = std::min(frame, static_cast<double>(total > 1 ? total - 1 : 0));
         const int64_t target = static_cast<int64_t>(frame);
@@ -185,7 +201,7 @@ public:
             m_seekRequest.store(target, std::memory_order_release);
         } else {
             m_seekRequest.store(-1, std::memory_order_release);
-            seekLocked(target);
+            seekAudible(target);
             if (m_state.load(std::memory_order_acquire) == PlayerState::Ended) {
                 m_state.store(PlayerState::Paused, std::memory_order_release);
             }
@@ -230,7 +246,12 @@ public:
 
     // ── Queries (never block on decoding) ────────────────────────────────────
 
-    PlayerState state() const { return m_state.load(std::memory_order_acquire); }
+    PlayerState state() const {
+        const PlayerState s = m_state.load(std::memory_order_acquire);
+        // A lost device that could not be reopened must not look like playback.
+        if (s == PlayerState::Playing && m_output->hasFailed()) return PlayerState::Error;
+        return s;
+    }
 
     double positionMs() const {
         std::lock_guard<std::mutex> lock(m_infoMutex);
@@ -408,14 +429,50 @@ private:
         m_eqPreamp = enabled ? std::pow(10.0, -maxBoost / 20.0) : 1.0;
     }
 
+    void clearNextSlot() {
+        std::lock_guard<std::mutex> lock(m_nextMutex);
+        m_next.reset();
+    }
+
     // A seek requested while the thread was stopping is applied synchronously.
     void applyPendingSeek() {
         const int64_t pending = m_seekRequest.exchange(-1, std::memory_order_acq_rel);
-        if (pending >= 0) seekLocked(pending);
+        if (pending >= 0) seekAudible(pending);
     }
 
-    void seekLocked(int64_t frame) {
+    /** True while the decoder runs ahead on the next track but its first sample is not audible yet. */
+    bool switchPending() const {
+        return m_prevDecoder && m_output->consumedFrames() < m_prevBoundary;
+    }
+
+    /** Puts the audible track back as the decoder; the look-ahead track is re-queued or dropped. */
+    void revertSwitch(bool keepNext) {
+        if (keepNext) {
+            std::lock_guard<std::mutex> lock(m_nextMutex);
+            if (!m_next) {
+                m_decoder->seekToFrame(0);  // it had already decoded its look-ahead
+                m_next = std::move(m_decoder);
+                m_nextGain = m_gainLinear;
+            }
+        }
+        m_decoder = std::move(m_prevDecoder);
+        m_gainLinear = m_prevGain;
+    }
+
+    /** Seeks the track that is being heard (frame in its own timeline). */
+    void seekAudible(int64_t frame) {
+        if (switchPending()) {
+            const TrackInfo info = m_prevInfo;
+            revertSwitch(!m_revertNext.exchange(false, std::memory_order_acq_rel));
+            seekLocked(frame, &info);
+        } else {
+            seekLocked(frame);
+        }
+    }
+
+    void seekLocked(int64_t frame, const TrackInfo* info = nullptr) {
         if (!m_decoder) return;
+        m_prevDecoder.reset();
         m_decoder->seekToFrame(static_cast<uint64_t>(std::max<int64_t>(frame, 0)));
         m_output->flush();
         m_eq.reset();
@@ -426,7 +483,7 @@ private:
         // Clear only the request we served; a newer one stays queued.
         int64_t served = frame;
         m_seekRequest.compare_exchange_strong(served, -1, std::memory_order_acq_rel);
-        resetSegments(static_cast<double>(frame), decoderInfo());
+        resetSegments(static_cast<double>(frame), info ? *info : decoderInfo());
     }
 
     // ── Decode thread ────────────────────────────────────────────────────────
@@ -452,9 +509,18 @@ private:
         setpriority(PRIO_PROCESS, static_cast<id_t>(gettid()), -16);
         while (!stopRequested()) {
             applyEq();
+            if (m_prevDecoder && !switchPending()) m_prevDecoder.reset();  // boundary is audible now
+            if (m_revertNext.exchange(false, std::memory_order_acq_rel) && switchPending()) {
+                // The next track was cleared before anyone heard it.
+                const int64_t audible = static_cast<int64_t>(audibleSourceFrame());
+                const TrackInfo info = m_prevInfo;
+                revertSwitch(false);
+                seekLocked(audible, &info);
+                continue;
+            }
             const int64_t seek = m_seekRequest.load(std::memory_order_acquire);
             if (seek >= 0) {
-                seekLocked(seek);
+                seekAudible(seek);
                 continue;
             }
             const double speed = m_speed.load(std::memory_order_acquire);
@@ -469,7 +535,7 @@ private:
                 // (or between stretch profiles) restarts from the audible frame.
                 m_normalPath = normal;
                 m_appliedSpeed = speed;
-                seekLocked(static_cast<int64_t>(audibleSourceFrame()));
+                seekAudible(static_cast<int64_t>(audibleSourceFrame()));
                 continue;
             }
             if (!normal && speed != m_appliedSpeed) {
@@ -585,6 +651,13 @@ private:
             gain = m_nextGain;
         }
         const TrackInfo info = makeInfo(*next, gain);
+        // Keep the finishing decoder until its last sample has been heard, so
+        // a seek or clearNext() in the meantime still applies to it.
+        m_revertNext.store(false, std::memory_order_release);
+        m_prevInfo = decoderInfo();
+        m_prevDecoder = std::move(m_decoder);
+        m_prevGain = m_gainLinear;
+        m_prevBoundary = boundaryOut;
         m_decoder = std::move(next);
         m_gainLinear = gain;
         appendSegment(boundaryOut, 0.0, m_normalPath ? 1.0 : m_appliedSpeed, info);
@@ -597,6 +670,7 @@ private:
      * player ends. Returns true when playback continues.
      */
     bool finishOrAdvance() {
+        m_prevDecoder.reset();
         std::unique_ptr<decoders::IAudioDecoder> next;
         double gain = 1.0;
         {
@@ -675,6 +749,13 @@ private:
     dsp::GraphicEqProcessor m_eq;
     dsp::TimeStretchProcessor m_stretch;
     dsp::StereoDownmix m_downmix;
+
+    // Gapless look-ahead: the finished decoder until its tail is audible.
+    std::unique_ptr<decoders::IAudioDecoder> m_prevDecoder;
+    double m_prevGain = 1.0;
+    TrackInfo m_prevInfo;
+    uint64_t m_prevBoundary = 0;
+    std::atomic<bool> m_revertNext{false};
 
     mutable std::mutex m_nextMutex;
     std::unique_ptr<decoders::IAudioDecoder> m_next;

@@ -177,6 +177,67 @@ void testGaplessSameFormat() {
     CHECK(half == 14400 || half > 14400 - 64);
 }
 
+size_t countLevel(const std::vector<float>& out, float level) {
+    size_t n = 0;
+    for (size_t i = 0; i < out.size(); i += 2) if (std::fabs(out[i] - level) < 1e-4f) ++n;
+    return n;
+}
+
+// The decoder runs ~300 ms ahead: near the end of A it is already on B while
+// A is still being heard. Seeks and clearNext() must apply to A.
+void testSeekDuringGaplessLookAhead() {
+    core::AudioPlayer p;
+    CHECK(p.load(std::make_unique<ToneDecoder>(30000, 48000, 2, 0.25), 1.0));  // 625 ms
+    p.setNext(std::make_unique<ToneDecoder>(14400, 48000, 2, 0.125), 1.0);
+    CHECK(p.play());
+    CHECK(waitFor([&] { return p.positionMs() > 420.0; }));  // B decoded, not yet audible
+    CHECK(!p.consumeTrackAdvanced());
+    p.seekToMs(100.0);
+    CHECK(waitFor([&] { return p.positionMs() > 120.0 && p.positionMs() < 300.0; }));
+    CHECK_NEAR(p.durationMs(), 625.0, 1e-9);  // still A
+    startCapture();
+    CHECK(waitFor([&] { return p.consumeTrackAdvanced(); }));  // B follows A after all
+    CHECK_NEAR(p.durationMs(), 300.0, 1e-9);
+    CHECK(waitFor([&] { return p.state() == PlayerState::Ended; }));
+    oboe::capture = false;
+    const auto captured = takeCapture();
+    const size_t heardB = countLevel(captured, 0.125f);
+    CHECK(heardB > 14400 - 64 && heardB <= 14400);  // B played once, completely
+}
+
+void testClearNextDuringGaplessLookAhead() {
+    core::AudioPlayer p;
+    CHECK(p.load(std::make_unique<ToneDecoder>(30000, 48000, 2, 0.25), 1.0));
+    p.setNext(std::make_unique<ToneDecoder>(14400, 48000, 2, 0.125), 1.0);
+    startCapture();
+    CHECK(p.play());
+    CHECK(waitFor([&] { return p.positionMs() > 420.0; }));
+    p.clearNext();
+    CHECK(waitFor([&] { return p.state() == PlayerState::Ended; }));
+    oboe::capture = false;
+    const auto out = takeCapture();
+    CHECK(!p.consumeTrackAdvanced());
+    // B was never heard (a few ramp samples pass through 0.125 on the way down/up).
+    CHECK(countLevel(out, 0.125f) < 16);
+    CHECK_NEAR(p.durationMs(), 625.0, 1e-9);
+    CHECK_NEAR(p.positionMs(), 625.0, 0.5);
+}
+
+void testFailedRestartIsReported() {
+    core::AudioPlayer p;
+    CHECK(p.load(std::make_unique<ToneDecoder>(96000), 1.0));
+    CHECK(p.play());
+    CHECK(waitFor([&] { return p.positionMs() > 50.0; }));
+    oboe::failOpen = true;  // the device stays gone
+    oboe::lastStream.lock()->disconnect();
+    CHECK(waitFor([&] { return p.state() == PlayerState::Error; }, 15000ms));
+    oboe::failOpen = false;
+    p.pause();
+    p.seekToMs(0);
+    CHECK(p.play());  // a later play reopens the output
+    CHECK(p.state() == PlayerState::Playing);
+}
+
 void testFormatChangeTransition() {
     core::AudioPlayer p;
     CHECK(p.load(std::make_unique<ToneDecoder>(4800, 48000, 2), 1.0));
@@ -334,16 +395,20 @@ int main() {
     testVolumeIsImmediate();
     testSeek();
     testGaplessSameFormat();
+    testSeekDuringGaplessLookAhead();
+    testClearNextDuringGaplessLookAhead();
     testFormatChangeTransition();
     testMultichannelFallback();
     testOutputFailure();
     testReconnect();
+    testFailedRestartIsReported();
     testLimiterAndEq();
     testSpeed();
     testSpectrum();
     testConcurrentControl();
     testDestroyWhilePlaying();
     std::puts("Player tests passed: end/drain, sample-exact pause/resume, immediate volume, seek, gapless, "
-              "format change, downmix fallback, output failure, reconnect, limiter+EQ, speed, spectrum, concurrency.");
+              "seek/clear during gapless look-ahead, format change, downmix fallback, output failure, reconnect, "
+              "failed restart, limiter+EQ, speed, spectrum, concurrency.");
     return 0;
 }

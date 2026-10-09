@@ -117,7 +117,6 @@ private fun LibraryHome(state: PlayerState, commands: PlayerCommands, onPlayed: 
     val scope = rememberCoroutineScope()
     var folders by remember { mutableStateOf(LibraryFolders.load(context)) }
     var accessible by remember { mutableStateOf(LibraryFolders.accessibleUris(context)) }
-    var busy by remember { mutableStateOf<String?>(null) }
     var servers by remember { mutableStateOf<List<DlnaServer>?>(null) }
     var scanning by remember { mutableStateOf(false) }
     val preview = LocalInspectionMode.current
@@ -129,22 +128,10 @@ private fun LibraryHome(state: PlayerState, commands: PlayerCommands, onPlayed: 
 
     fun toast(text: String) = Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
 
+    // Scanning runs in the service, so leaving this screen does not lose it.
     fun addFromFolder(entry: LibraryFolderEntry, play: Boolean) {
-        busy = entry.label
-        scope.launch {
-            val tracks = withContext(Dispatchers.IO) {
-                PlaylistOrdering.sortTracks(SafTreeScanner.scanTracks(context.contentResolver, Uri.parse(entry.uriString)), state.settings.sortMode)
-            }
-            busy = null
-            if (tracks.isEmpty()) {
-                toast(context.getString(R.string.no_tracks_in, entry.label))
-            } else if (play) {
-                commands.setQueue(tracks, 0, true)
-                onPlayed()
-            } else {
-                toast(context.getString(R.string.added_tracks, commands.addTracks(tracks), entry.label))
-            }
-        }
+        commands.importFolder(entry.uriString, null, entry.label, play)
+        if (play) onPlayed()
     }
 
     val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -156,16 +143,7 @@ private fun LibraryHome(state: PlayerState, commands: PlayerCommands, onPlayed: 
         }
     }
 
-    fun scanDevice() {
-        busy = context.getString(R.string.device)
-        scope.launch {
-            val tracks = withContext(Dispatchers.IO) {
-                PlaylistOrdering.sortTracks(MediaStoreScanner.scan(context.contentResolver), state.settings.sortMode)
-            }
-            busy = null
-            toast(context.getString(R.string.added_tracks, commands.addTracks(tracks), context.getString(R.string.device)))
-        }
-    }
+    fun scanDevice() = commands.importDeviceLibrary()
 
     val mediaPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
     val requestMedia = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -200,7 +178,7 @@ private fun LibraryHome(state: PlayerState, commands: PlayerCommands, onPlayed: 
             Row(Modifier.padding(horizontal = 20.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 AwButton(stringResource(R.string.add_folder), { pickFolder.launch(null) }, tone = aw.violet, icon = Icons.Outlined.Add)
             }
-            busy?.let { label ->
+            state.importing?.let { label ->
                 Row(Modifier.padding(horizontal = 20.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(Modifier.size(14.dp), color = aw.violet, strokeWidth = 1.5.dp)
                     Spacer(Modifier.width(10.dp))
@@ -306,7 +284,6 @@ private fun LibraryHome(state: PlayerState, commands: PlayerCommands, onPlayed: 
 private fun FolderBrowser(page: LibraryPage.Folder, commands: PlayerCommands, onPlayed: () -> Unit, onNavigate: (LibraryPage) -> Unit) {
     val aw = Aw.colors
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     val location = page.stack.last()
     val treeUri = remember(page.root) { Uri.parse(page.root.uriString) }
     var entries by remember(location) { mutableStateOf<List<BrowseEntry>?>(null) }
@@ -329,16 +306,11 @@ private fun FolderBrowser(page: LibraryPage.Folder, commands: PlayerCommands, on
         error = error,
         actions = {
             AwButton(stringResource(R.string.play_folder), {
-                scope.launch {
-                    val all = withContext(Dispatchers.IO) { SafTreeScanner.scanTracks(context.contentResolver, treeUri, location.documentId, location.label) }
-                    if (all.isNotEmpty()) { commands.setQueue(all, 0, true); onPlayed() }
-                }
+                commands.importFolder(page.root.uriString, location.documentId, location.label, play = true)
+                onPlayed()
             }, Modifier.weight(1f), tone = aw.violet)
             AwButton(stringResource(R.string.add_folder_to_queue), {
-                scope.launch {
-                    val all = withContext(Dispatchers.IO) { SafTreeScanner.scanTracks(context.contentResolver, treeUri, location.documentId, location.label) }
-                    Toast.makeText(context, context.getString(R.string.added_tracks, commands.addTracks(all), location.label), Toast.LENGTH_SHORT).show()
-                }
+                commands.importFolder(page.root.uriString, location.documentId, location.label, play = false)
             }, Modifier.weight(1f))
         },
     ) {

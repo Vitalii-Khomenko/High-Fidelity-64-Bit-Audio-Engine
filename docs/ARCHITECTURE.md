@@ -45,6 +45,11 @@ it, renders `state` / `position` and calls `PlayerCommands`.
   queue), gapless switches and errors (skips up to five broken files during
   continuous playback), pre-loads the next track 20 s before the end, and saves
   the resume point every 5 s.
+- **Library import** — folder and device scans run in the service scope, so
+  they finish even if the user leaves the screen; results arrive as messages.
+- **Binding** — `MainActivity` binds in `onCreate` and unbinds in `onDestroy`.
+  System pickers stop the activity; unbinding there used to drop the UI that
+  was waiting for the picker result.
 - **Loading** — DLNA URLs are downloaded to the cache first
   (`DlnaPlaybackCache`); everything else opens through the content resolver and
   the descriptor is handed to native code.

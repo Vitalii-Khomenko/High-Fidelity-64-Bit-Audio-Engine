@@ -14,6 +14,8 @@ data class PlayerState(
     val playedUris: Set<String> = emptySet(),
     /** SystemClock.elapsedRealtime() at which the sleep timer pauses, 0 when off. */
     val sleepTimerEndsAt: Long = 0L,
+    /** Label of the folder or source being scanned, null when idle. */
+    val importing: String? = null,
 ) {
     val current: Track? get() = tracks.getOrNull(currentIndex)
     val totalDurationMs: Long get() = tracks.sumOf { it.durationMs.coerceAtLeast(0L) }

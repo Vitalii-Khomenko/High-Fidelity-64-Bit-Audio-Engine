@@ -49,6 +49,10 @@ class MainActivity : ComponentActivity() {
         themeMode = ThemeMode.fromId(uiPrefs.getInt(KEY_THEME, ThemeMode.SYSTEM.id))
         applySystemBars(themeMode)
         requestPermissionsOnce(uiPrefs)
+        // Bound for the activity's whole life, not just while visible: system
+        // pickers (folder chooser) stop this activity, and dropping the service
+        // there tore down the UI that was waiting for the picker's result.
+        bindService(Intent(this, PlaybackService::class.java), connection, Context.BIND_AUTO_CREATE)
         setContent {
             HiFiApp(
                 service = service,
@@ -62,15 +66,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onStart() {
-        super.onStart()
-        bindService(Intent(this, PlaybackService::class.java), connection, Context.BIND_AUTO_CREATE)
-    }
-
-    override fun onStop() {
-        super.onStop()
+    override fun onDestroy() {
         unbindService(connection)
         service = null
+        super.onDestroy()
     }
 
     /** Notifications (Android 13+) and Bluetooth codec info (Android 12+), asked once. */

@@ -26,4 +26,13 @@ interface PlayerCommands {
     fun clearPlayedMarks()
     fun updateDurations(durations: Map<String, Long>)
     fun readSpectrum(bands: FloatArray)
+
+    /**
+     * Scans a SAF folder (all subfolders) in the background and adds the tracks,
+     * or replaces the queue and plays when [play] is true. Survives the UI going away.
+     */
+    fun importFolder(treeUri: String, documentId: String?, label: String, play: Boolean)
+
+    /** Adds every playable file MediaStore knows about. */
+    fun importDeviceLibrary()
 }

@@ -31,7 +31,8 @@ ReplayGain tags, MP3 CBR / VBR / VBR without Xing, a 10-minute MP3).
 decoder seek and without losing samples, immediate volume, seeks while playing
 and paused, gapless switch (sample count and per-track gain), format-change
 transition, multichannel fallback to stereo, output failure, device reconnect,
-limiter ceiling with EQ boost, time-stretch timing, spectrum, concurrent control
+seek and clear-next during the gapless look-ahead window, a reconnect whose
+restart keeps failing, limiter ceiling with EQ boost, time-stretch timing, spectrum, concurrent control
 from several threads and destruction while playing.
 
 The stubs exist only on the test include path; Android builds use real Oboe.

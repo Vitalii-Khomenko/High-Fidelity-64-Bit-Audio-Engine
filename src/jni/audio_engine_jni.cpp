@@ -5,6 +5,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <unistd.h>
 
 #include "../core/AudioPlayer.h"
@@ -20,16 +21,28 @@ namespace dec = audio_engine::decoders;
 
 namespace {
 
-// The mutex only guards the pointer. Each call works on its own reference, so
-// a slow call never blocks the others and shutdown cannot free a player that
-// is still in use.
-std::mutex g_mutex;
-std::shared_ptr<AudioPlayer> g_player;
-std::atomic<uint64_t> g_nextGeneration{0};
+// Each Kotlin AudioEngine owns one instance, addressed by an opaque id. The
+// registry mutex only guards the map: a call copies the shared_ptr and works on
+// its own reference, so a slow call never blocks others, and releasing one
+// instance (e.g. by a service being destroyed) can never touch a newer one.
+struct Instance {
+    std::shared_ptr<AudioPlayer> player = std::make_shared<AudioPlayer>();
+    std::atomic<uint64_t> nextGeneration{0};
+};
 
-std::shared_ptr<AudioPlayer> player() {
+std::mutex g_mutex;
+std::unordered_map<jlong, std::shared_ptr<Instance>> g_instances;
+jlong g_lastId = 0;
+
+std::shared_ptr<Instance> instance(jlong id) {
     std::lock_guard<std::mutex> lock(g_mutex);
-    return g_player;
+    const auto it = g_instances.find(id);
+    return it == g_instances.end() ? nullptr : it->second;
+}
+
+std::shared_ptr<AudioPlayer> player(jlong id) {
+    auto inst = instance(id);
+    return inst ? inst->player : nullptr;
 }
 
 struct OwnedFd {
@@ -85,125 +98,133 @@ double gainFor(int fd, jint replayGainMode) {
 
 extern "C" {
 
-JNIEXPORT void JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeInit(JNIEnv*, jobject) {
+JNIEXPORT jlong JNICALL
+Java_com_aiproject_musicplayer_AudioEngine_nativeCreate(JNIEnv*, jobject) {
+    auto inst = std::make_shared<Instance>();
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (!g_player) g_player = std::make_shared<AudioPlayer>();
+    const jlong id = ++g_lastId;
+    g_instances.emplace(id, std::move(inst));
+    return id;
 }
 
 JNIEXPORT void JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeRelease(JNIEnv*, jobject) {
-    std::shared_ptr<AudioPlayer> released;
+Java_com_aiproject_musicplayer_AudioEngine_nativeRelease(JNIEnv*, jobject, jlong id) {
+    std::shared_ptr<Instance> released;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        released.swap(g_player);
+        const auto it = g_instances.find(id);
+        if (it == g_instances.end()) return;
+        released = std::move(it->second);
+        g_instances.erase(it);
     }
-    ++g_nextGeneration;
+    ++released->nextGeneration;
     // Destroyed here (or by the last in-flight call) outside the mutex.
 }
 
 /** Takes ownership of fd. */
 JNIEXPORT jboolean JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeLoad(JNIEnv*, jobject, jint fd, jint replayGainMode) {
+Java_com_aiproject_musicplayer_AudioEngine_nativeLoad(JNIEnv*, jobject, jlong id, jint fd, jint replayGainMode) {
     OwnedFd owned{fd};
-    if (fd < 0) return JNI_FALSE;
-    ++g_nextGeneration;
+    auto inst = instance(id);
+    if (fd < 0 || !inst) return JNI_FALSE;
+    ++inst->nextGeneration;
     auto decoder = openDecoder(fd);
     if (!decoder) return JNI_FALSE;
     const double gain = gainFor(fd, replayGainMode);
-    auto p = player();
-    return p && p->load(std::move(decoder), gain) ? JNI_TRUE : JNI_FALSE;
+    return inst->player->load(std::move(decoder), gain) ? JNI_TRUE : JNI_FALSE;
 }
 
 /** Takes ownership of fd. Ignored if load()/clearNext() happened meanwhile. */
 JNIEXPORT jboolean JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeLoadNext(JNIEnv*, jobject, jint fd, jint replayGainMode) {
+Java_com_aiproject_musicplayer_AudioEngine_nativeLoadNext(JNIEnv*, jobject, jlong id, jint fd, jint replayGainMode) {
     OwnedFd owned{fd};
-    if (fd < 0) return JNI_FALSE;
-    const uint64_t generation = g_nextGeneration.load();
+    auto inst = instance(id);
+    if (fd < 0 || !inst) return JNI_FALSE;
+    const uint64_t generation = inst->nextGeneration.load();
     auto decoder = openDecoder(fd);
     if (!decoder) return JNI_FALSE;
     const double gain = gainFor(fd, replayGainMode);
-    auto p = player();
-    if (!p || generation != g_nextGeneration.load()) return JNI_FALSE;
-    p->setNext(std::move(decoder), gain);
+    if (generation != inst->nextGeneration.load()) return JNI_FALSE;
+    inst->player->setNext(std::move(decoder), gain);
     return JNI_TRUE;
 }
 
 JNIEXPORT void JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeClearNext(JNIEnv*, jobject) {
-    ++g_nextGeneration;
-    if (auto p = player()) p->clearNext();
+Java_com_aiproject_musicplayer_AudioEngine_nativeClearNext(JNIEnv*, jobject, jlong id) {
+    auto inst = instance(id);
+    if (!inst) return;
+    ++inst->nextGeneration;
+    inst->player->clearNext();
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativePlay(JNIEnv*, jobject) {
-    auto p = player();
+Java_com_aiproject_musicplayer_AudioEngine_nativePlay(JNIEnv*, jobject, jlong id) {
+    auto p = player(id);
     return p && p->play() ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativePause(JNIEnv*, jobject) {
-    if (auto p = player()) p->pause();
+Java_com_aiproject_musicplayer_AudioEngine_nativePause(JNIEnv*, jobject, jlong id) {
+    if (auto p = player(id)) p->pause();
 }
 
 JNIEXPORT void JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeStop(JNIEnv*, jobject) {
-    if (auto p = player()) p->stop();
+Java_com_aiproject_musicplayer_AudioEngine_nativeStop(JNIEnv*, jobject, jlong id) {
+    if (auto p = player(id)) p->stop();
 }
 
 JNIEXPORT void JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeSeekTo(JNIEnv*, jobject, jdouble positionMs) {
-    if (auto p = player()) p->seekToMs(positionMs);
+Java_com_aiproject_musicplayer_AudioEngine_nativeSeekTo(JNIEnv*, jobject, jlong id, jdouble positionMs) {
+    if (auto p = player(id)) p->seekToMs(positionMs);
 }
 
 JNIEXPORT void JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeSetVolume(JNIEnv*, jobject, jdouble volume) {
-    if (auto p = player()) p->setVolume(volume);
+Java_com_aiproject_musicplayer_AudioEngine_nativeSetVolume(JNIEnv*, jobject, jlong id, jdouble volume) {
+    if (auto p = player(id)) p->setVolume(volume);
 }
 
 JNIEXPORT void JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeSetSpeed(JNIEnv*, jobject, jdouble speed) {
-    if (auto p = player()) p->setSpeed(speed);
+Java_com_aiproject_musicplayer_AudioEngine_nativeSetSpeed(JNIEnv*, jobject, jlong id, jdouble speed) {
+    if (auto p = player(id)) p->setSpeed(speed);
 }
 
 JNIEXPORT void JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeSetSpeedMode(JNIEnv*, jobject, jint mode) {
-    if (auto p = player()) p->setSpeedMode(mode);
+Java_com_aiproject_musicplayer_AudioEngine_nativeSetSpeedMode(JNIEnv*, jobject, jlong id, jint mode) {
+    if (auto p = player(id)) p->setSpeedMode(mode);
 }
 
 JNIEXPORT void JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeSetEqEnabled(JNIEnv*, jobject, jboolean enabled) {
-    if (auto p = player()) p->setEqEnabled(enabled == JNI_TRUE);
+Java_com_aiproject_musicplayer_AudioEngine_nativeSetEqEnabled(JNIEnv*, jobject, jlong id, jboolean enabled) {
+    if (auto p = player(id)) p->setEqEnabled(enabled == JNI_TRUE);
 }
 
 JNIEXPORT void JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeSetEqBand(JNIEnv*, jobject, jint band, jdouble gainDb) {
+Java_com_aiproject_musicplayer_AudioEngine_nativeSetEqBand(JNIEnv*, jobject, jlong id, jint band, jdouble gainDb) {
     if (band < 0) return;
-    if (auto p = player()) p->setEqBandGain(static_cast<size_t>(band), gainDb);
+    if (auto p = player(id)) p->setEqBandGain(static_cast<size_t>(band), gainDb);
 }
 
 JNIEXPORT jint JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeGetState(JNIEnv*, jobject) {
-    auto p = player();
+Java_com_aiproject_musicplayer_AudioEngine_nativeGetState(JNIEnv*, jobject, jlong id) {
+    auto p = player(id);
     return p ? static_cast<jint>(p->state()) : 0;
 }
 
 JNIEXPORT jdouble JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeGetPositionMs(JNIEnv*, jobject) {
-    auto p = player();
+Java_com_aiproject_musicplayer_AudioEngine_nativeGetPositionMs(JNIEnv*, jobject, jlong id) {
+    auto p = player(id);
     return p ? p->positionMs() : 0.0;
 }
 
 JNIEXPORT jdouble JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeGetDurationMs(JNIEnv*, jobject) {
-    auto p = player();
+Java_com_aiproject_musicplayer_AudioEngine_nativeGetDurationMs(JNIEnv*, jobject, jlong id) {
+    auto p = player(id);
     return p ? p->durationMs() : 0.0;
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeConsumeTrackAdvanced(JNIEnv*, jobject) {
-    auto p = player();
+Java_com_aiproject_musicplayer_AudioEngine_nativeConsumeTrackAdvanced(JNIEnv*, jobject, jlong id) {
+    auto p = player(id);
     return p && p->consumeTrackAdvanced() ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -212,10 +233,10 @@ Java_com_aiproject_musicplayer_AudioEngine_nativeConsumeTrackAdvanced(JNIEnv*, j
  *       outputChannels, gainCentiDb, serialLow32, underruns]
  */
 JNIEXPORT void JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeGetTrackInfo(JNIEnv* env, jobject, jintArray out) {
+Java_com_aiproject_musicplayer_AudioEngine_nativeGetTrackInfo(JNIEnv* env, jobject, jlong id, jintArray out) {
     if (!out) return;
     jint values[10] = {};
-    if (auto p = player()) {
+    if (auto p = player(id)) {
         const TrackInfo info = p->trackInfo();
         values[0] = static_cast<jint>(info.sampleRate);
         values[1] = static_cast<jint>(info.channels);
@@ -233,11 +254,11 @@ Java_com_aiproject_musicplayer_AudioEngine_nativeGetTrackInfo(JNIEnv* env, jobje
 }
 
 JNIEXPORT void JNICALL
-Java_com_aiproject_musicplayer_AudioEngine_nativeGetSpectrum(JNIEnv* env, jobject, jfloatArray out) {
+Java_com_aiproject_musicplayer_AudioEngine_nativeGetSpectrum(JNIEnv* env, jobject, jlong id, jfloatArray out) {
     if (!out) return;
     const jsize count = std::min<jsize>(env->GetArrayLength(out), audio_engine::dsp::SpectrumAnalyzer::kMaxBands);
     float bands[audio_engine::dsp::SpectrumAnalyzer::kMaxBands] = {};
-    if (auto p = player()) p->spectrum(bands, static_cast<int>(count));
+    if (auto p = player(id)) p->spectrum(bands, static_cast<int>(count));
     env->SetFloatArrayRegion(out, 0, count, bands);
 }
 

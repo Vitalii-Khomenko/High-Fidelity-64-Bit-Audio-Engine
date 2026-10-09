@@ -85,6 +85,12 @@ and a short mutex; they never wait for decoding, file I/O or seeking.
   new format and playback continues (a short gap of the stream start latency).
 - **No next track** — the ring is drained, the stream paused, state `Ended`.
 
+Because the decoder runs ~300 ms ahead, it switches before the boundary is
+audible. Until then the finished decoder is kept: a seek in that window applies
+to the track being heard (the next track is rewound and re-queued), and
+`clearNext()` undoes the switch and continues the current track from the
+audible frame.
+
 The JNI layer guards the next slot with a generation counter, so a pre-load that
 finishes after `load()` or `clearNext()` is discarded.
 
@@ -101,8 +107,10 @@ opens stereo and folds down (`dsp/ChannelMixer.h`: centre and surrounds at
 **Reconnect:** Oboe reports a disconnect through `onErrorAfterClose`. The error
 callback only holds a shared signal object (never a pointer to the output, which
 may already be gone). A worker thread reopens the stream with the *same* format,
-keeps the queued audio, and restarts it if playback was running. A healthy
-stream that was already replaced is left alone.
+keeps the queued audio, and restarts it if playback was running; recovery counts
+only once the stream has started. It retries for about 10 seconds; after that
+the player reports `Error` instead of appearing to play. A healthy stream that
+was already replaced is left alone.
 
 **Callback state** (ring pointer, scratch buffers, channel count) changes only
 while no stream is open; sample rate and channel count are atomics for readers.
@@ -202,9 +210,11 @@ heard rather than what was decoded 300 ms earlier.
 | `setVolume`, `setSpeed`, `setSpeedMode`, `setEqEnabled`, `setEqBand` | Controls |
 | `state()`, `positionMs()`, `durationMs()`, `format()`, `consumeTrackAdvanced()`, `spectrum()` | Non-blocking queries |
 
-The global mutex only protects the `shared_ptr` to the player; each call holds
-its own reference, so a slow call never blocks the others and release cannot
-free an object still in use.
+Each Kotlin `AudioEngine` owns a native instance addressed by an id
+(`nativeCreate` / `nativeRelease`). A registry mutex only guards the id map;
+each call copies the instance's `shared_ptr`, so a slow call never blocks the
+others, release cannot free an object still in use, and one service can never
+release another service's player.
 
 ## Threads and locks
 

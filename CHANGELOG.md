@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.1 — 2026-10-09
+
+### Fixed
+
+- **Adding a folder added nothing.** The system folder picker stops the activity, which unbound the playback service and tore down the screen waiting for the picker's result. The service now stays bound for the activity's lifetime, and folder / device scans run in the service, so switching tabs during a scan no longer loses it.
+- **Engine instances are per service.** A destroyed service could release the native player a new service had just started using (JNI now addresses instances by id).
+- **Device reconnect** counts as recovered only when the new stream actually started; if the device stays unavailable the player reports an error instead of silently "playing".
+- **Gapless look-ahead.** While the end of a track is still audible and the decoder already runs on the next one, a seek applies to the audible track and clearing the next track undoes the switch.
+- **Failed track open** silences the previous track and releases audio focus instead of leaving it playing behind a paused UI.
+- **Ducking** is reset when focus is granted again, so playback can no longer stay at a quarter of the volume.
+- **Bookmarks from 0.8.x** (stored by hash) are migrated on first read.
+
 ## 0.9.0 — 2026-10-09
 
 A rewrite of the playback core and the app around it.

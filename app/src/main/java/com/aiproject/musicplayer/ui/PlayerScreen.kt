@@ -187,6 +187,7 @@ private fun NowPlaying(state: PlayerState, position: PlaybackPosition, commands:
                 Modifier.weight(1f),
             )
             if (state.isLoading) Eyebrow(stringResource(R.string.loading), color = aw.amber)
+            else state.importing?.let { Eyebrow(stringResource(R.string.scanning, it), color = aw.violet) }
         }
         Spacer(Modifier.height(10.dp))
         Text(

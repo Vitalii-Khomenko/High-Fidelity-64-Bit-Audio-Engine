@@ -135,6 +135,8 @@ public:
         return m_configured;
     }
     bool isRunRequested() const { return m_runRequested.load(std::memory_order_acquire); }
+    /** True when a lost device could not be reopened; cleared by the next successful open. */
+    bool hasFailed() const { return m_failed.load(std::memory_order_acquire); }
     uint32_t sampleRate() const { return m_sampleRate.load(std::memory_order_acquire); }
     int channels() const { return m_channels.load(std::memory_order_acquire); }
 
@@ -271,6 +273,7 @@ public:
 
 private:
     static constexpr size_t kChunkFrames = 512;
+    static constexpr int kReconnectAttempts = 50;  // 200 ms apart: 10 s for a device to settle
 
     struct ReconnectSignal {
         std::mutex mutex;
@@ -350,6 +353,7 @@ private:
         m_idle.store(true, std::memory_order_release);
         m_stream = std::move(stream);
         m_started = false;
+        m_failed.store(false, std::memory_order_release);
         ENGINE_LOGI("Oboe stream opened: %u Hz, %d ch", sampleRate(), channels);
         return true;
     }
@@ -378,7 +382,7 @@ private:
             m_signal->pending = false;
             signalLock.unlock();
             bool reopened = false;
-            for (int attempt = 0; attempt < 20 && !reopened; ++attempt) {
+            for (int attempt = 0; attempt < kReconnectAttempts && !reopened; ++attempt) {
                 {
                     std::lock_guard<std::mutex> lock(m_streamMutex);
                     if (!m_configured) { reopened = true; break; }
@@ -391,11 +395,16 @@ private:
                     }
                     // Reopen with the same format so pitch and channel layout
                     // stay correct; Oboe resamples if the new device differs.
+                    // Recovered only once the stream is open and, if playback
+                    // was running, actually started again.
                     if (openLocked(channels())) {
-                        reopened = true;
-                        if (m_runRequested.load(std::memory_order_acquire) &&
-                            m_stream->requestStart() == oboe::Result::OK) {
+                        if (!m_runRequested.load(std::memory_order_acquire)) {
+                            reopened = true;
+                        } else if (m_stream->requestStart() == oboe::Result::OK) {
                             m_started = true;
+                            reopened = true;
+                        } else {
+                            closeStreamLocked();
                         }
                     }
                 }
@@ -405,6 +414,8 @@ private:
                     if (!m_signal->alive) return;
                 }
             }
+            // Every attempt failed: report it so the player stops claiming to play.
+            m_failed.store(!reopened, std::memory_order_release);
             signalLock.lock();
         }
     }
@@ -432,6 +443,7 @@ private:
     double m_gain = 1.0;
     double m_limiterGain = 1.0;
 
+    std::atomic<bool> m_failed{false};
     std::atomic<bool> m_runRequested{false};
     std::atomic<bool> m_idle{true};
     std::atomic<int> m_silentCallbacks{0};

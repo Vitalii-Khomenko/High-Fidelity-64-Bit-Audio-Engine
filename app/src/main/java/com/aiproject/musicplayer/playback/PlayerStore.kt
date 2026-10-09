@@ -92,14 +92,23 @@ class PlayerStore(context: Context) {
 
     // ── Books mode ───────────────────────────────────────────────────────────
 
-    fun bookmark(uri: String): Long = prefs.getFloat(bookmarkKey(uri), 0f).toLong()
+    fun bookmark(uri: String): Long {
+        val key = bookmarkKey(uri)
+        if (prefs.contains(key)) return prefs.getFloat(key, 0f).toLong()
+        // 0.8.x and earlier keyed bookmarks by uri.hashCode(); migrate on first read.
+        val legacyKey = legacyBookmarkKey(uri)
+        if (!prefs.contains(legacyKey)) return 0L
+        val position = prefs.getFloat(legacyKey, 0f)
+        prefs.edit().putFloat(key, position).remove(legacyKey).apply()
+        return position.toLong()
+    }
 
     fun saveBookmark(uri: String, positionMs: Long) {
         prefs.edit().putFloat(bookmarkKey(uri), positionMs.toFloat()).apply()
     }
 
     fun clearBookmark(uri: String) {
-        prefs.edit().remove(bookmarkKey(uri)).apply()
+        prefs.edit().remove(bookmarkKey(uri)).remove(legacyBookmarkKey(uri)).apply()
     }
 
     fun playedUris(): Set<String> = progress.getStringSet(KEY_PLAYED, emptySet())?.toSet() ?: emptySet()
@@ -109,6 +118,10 @@ class PlayerStore(context: Context) {
     }
 
     private fun bookmarkKey(uri: String) = "pos_uri_$uri"
+
+    // String.hashCode() is specified by the JVM, so this matches the old Uri.hashCode()
+    // of android.net.Uri (which hashes its string form).
+    private fun legacyBookmarkKey(uri: String) = "pos_${uri.hashCode()}"
 
     companion object {
         private const val KEY_QUEUE = "playlist_json"
