@@ -4,7 +4,6 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -16,11 +15,14 @@ import android.media.AudioManager
 import android.net.Uri
 import android.os.Binder
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.DocumentsContract
+import android.os.Process
+import android.support.v4.media.MediaBrowserCompat.MediaItem
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
@@ -28,6 +30,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import androidx.media.app.NotificationCompat.MediaStyle
+import androidx.media.MediaBrowserServiceCompat
 import androidx.media.session.MediaButtonReceiver
 import com.aiproject.musicplayer.AudioEngine
 import com.aiproject.musicplayer.MainActivity
@@ -65,7 +68,7 @@ import java.util.concurrent.Executors
  * All queue/state mutation happens on the main thread. Engine transport calls
  * run in order on a single background thread ([engineDispatcher]).
  */
-class PlaybackService : Service(), PlayerCommands {
+class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
 
     inner class LocalBinder : Binder() {
         val service: PlaybackService get() = this@PlaybackService
@@ -80,6 +83,10 @@ class PlaybackService : Service(), PlayerCommands {
     private lateinit var store: PlayerStore
     private lateinit var session: MediaSessionCompat
     private lateinit var audioManager: AudioManager
+    private lateinit var browseTree: BrowseTree
+    private var publishedQueue: List<Track>? = null     // what the session queue currently shows
+    private var publishedWindow = 0 to 0
+    private var lastError: String? = null               // shown by Android Auto until the next start
     private val queue = PlaybackQueue()
     private val focusPolicy = AudioFocusPolicy()
     private var focusRequest: AudioFocusRequest? = null
@@ -145,6 +152,8 @@ class PlaybackService : Service(), PlayerCommands {
         engine = AudioEngine()
         createNotificationChannel()
         setupSession()
+        sessionToken = session.sessionToken   // lets Android Auto and other browsers connect
+        browseTree = BrowseTree(this)
         ContextCompat.registerReceiver(
             this, noisyReceiver, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY), ContextCompat.RECEIVER_NOT_EXPORTED,
         )
@@ -152,17 +161,151 @@ class PlaybackService : Service(), PlayerCommands {
         startMonitor()
     }
 
-    override fun onBind(intent: Intent): IBinder = binder
+    /** Media browsers (Android Auto) get the browser binder; our own UI gets [LocalBinder]. */
+    override fun onBind(intent: Intent): IBinder? =
+        if (intent.action == SERVICE_INTERFACE) super.onBind(intent) else binder
+
+    // ── Media browser (Android Auto) ────────────────────────────────────────
+
+    override fun onGetRoot(clientPackageName: String, clientUid: Int, rootHints: Bundle?): BrowserRoot =
+        if (isTrustedBrowser(clientPackageName, clientUid)) {
+            BrowserRoot(MediaId.Root.encode(), BrowseTree.rootExtras())
+        } else {
+            // Others may still control playback through the session, but not read the library.
+            BrowserRoot(MediaId.Empty.encode(), null)
+        }
+
+    private fun isTrustedBrowser(packageName: String, uid: Int): Boolean =
+        uid == Process.myUid() || uid == Process.SYSTEM_UID || packageName in TRUSTED_BROWSERS
+
+    override fun onLoadChildren(parentId: String, result: Result<MutableList<MediaItem>>) {
+        when (val id = MediaId.parse(parentId)) {
+            MediaId.Root -> result.sendResult(browseTree.rootChildren().toMutableList())
+            MediaId.Queue -> result.sendResult(browseTree.queueChildren(queue.tracks, queue.currentIndex).toMutableList())
+            MediaId.Playlists, MediaId.Folders, is MediaId.Playlist, is MediaId.Folder -> {
+                result.detach()
+                scope.launch {
+                    val items = try {
+                        withContext(Dispatchers.IO) {
+                            when (id) {
+                                MediaId.Playlists -> browseTree.playlistsChildren()
+                                MediaId.Folders -> browseTree.foldersChildren()
+                                is MediaId.Playlist -> browseTree.playlistChildren(id.id)
+                                is MediaId.Folder -> browseTree.folderChildren(contentResolver, id)
+                                else -> emptyList()
+                            }
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        emptyList()
+                    }
+                    result.sendResult(items.toMutableList())
+                }
+            }
+            else -> result.sendResult(mutableListOf())
+        }
+    }
+
+    override fun onSearch(query: String, extras: Bundle?, result: Result<MutableList<MediaItem>>) {
+        val q = MediaSearch.normalize(query)
+        val items = queue.tracks.withIndex()
+            .filter { (_, t) -> q.isNotEmpty() && MediaSearch.normalize(t.title).contains(q) }
+            .take(50)
+            .map { (i, t) -> MediaItem(browseTree.description(MediaId.QueueTrack(i, t.uri), t), MediaItem.FLAG_PLAYABLE) }
+        result.sendResult(items.toMutableList())
+    }
+
+    /** Plays a browse-tree item chosen in the car. */
+    private fun playMediaId(mediaId: String?) {
+        when (val id = MediaId.parse(mediaId)) {
+            is MediaId.QueueTrack -> {
+                val index = if (queue.tracks.getOrNull(id.index)?.uri == id.uri) id.index
+                else queue.tracks.indexOfFirst { it.uri == id.uri }
+                if (index >= 0) playIndex(index)
+            }
+            is MediaId.Playlist -> playPlaylist(id.id, 0)
+            is MediaId.PlaylistTrack -> playPlaylist(id.playlistId, id.index)
+            is MediaId.Folder -> importFolder(id.treeUri, id.documentId, id.label, play = true)
+            is MediaId.FolderTrack -> scope.launch {
+                val tracks = runCatching {
+                    withContext(Dispatchers.IO) { browseTree.folderTracks(contentResolver, id.treeUri, id.documentId, id.label) }
+                }.getOrDefault(emptyList())
+                if (id.index in tracks.indices) setQueue(tracks, id.index, true) else reportError(id.label)
+            }
+            MediaId.Queue -> play()
+            else -> Unit
+        }
+    }
+
+    private fun playPlaylist(playlistId: Int, index: Int) {
+        scope.launch {
+            val (tracks, shuffle) = runCatching {
+                withContext(Dispatchers.IO) { browseTree.playlistTracks(playlistId) to browseTree.playlistShuffle(playlistId) }
+            }.getOrDefault(emptyList<Track>() to false)
+            if (index !in tracks.indices) return@launch
+            setQueue(tracks, index, true)
+            if (shuffle != queue.shuffle) setShuffle(shuffle)
+        }
+    }
+
+    /** Voice: "play <query> on HiFi Player". An empty query resumes playback. */
+    fun playFromSearch(query: String?) {
+        if (query.isNullOrBlank()) {
+            play()
+            return
+        }
+        val inQueue = MediaSearch.bestMatch(query, queue.tracks.map { it.title })
+        if (inQueue >= 0) {
+            playIndex(inQueue)
+            return
+        }
+        scope.launch {
+            val playlist = runCatching { withContext(Dispatchers.IO) { browseTree.playlistByName(query) } }.getOrNull()
+            if (playlist != null) {
+                playPlaylist(playlist.first, 0)
+                return@launch
+            }
+            val folder = runCatching { withContext(Dispatchers.IO) { browseTree.matchingFolder(query) } }.getOrNull()
+            if (folder != null) importFolder(folder.treeUri, folder.documentId, folder.label, play = true)
+            else reportError(query)
+        }
+    }
+
+    private fun reportError(subject: String) {
+        val message = getString(R.string.error_cannot_play, subject)
+        lastError = message
+        _messages.tryEmit(message)
+        updateSessionState()
+    }
+
+    /** Mirrors the queue (a window around the current track) into the session for the car's queue view. */
+    private fun publishSessionQueue() {
+        val tracks = queue.tracks
+        val window = queueWindow(tracks.size, queue.currentIndex)
+        if (tracks === publishedQueue && window == publishedWindow) return
+        val tracksChanged = tracks !== publishedQueue
+        publishedQueue = tracks
+        publishedWindow = window
+        session.setQueue(
+            (window.first until window.second).map { i ->
+                android.support.v4.media.session.MediaSessionCompat.QueueItem(
+                    browseTree.description(MediaId.QueueTrack(i, tracks[i].uri), tracks[i]), i.toLong(),
+                )
+            },
+        )
+        session.setQueueTitle(getString(R.string.queue))
+        if (tracksChanged) notifyChildrenChanged(MediaId.Queue.encode())
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Started with startForegroundService(): promote at once, as required.
         // Stay foreground while the command (e.g. a media button "play") is
         // handled: on Android 15+ audio focus is only granted to a foreground app.
         if (!isForeground) promoteToForeground()
-        when (intent?.action) {
-            ACTION_STOP -> stop()
-            else -> MediaButtonReceiver.handleIntent(session, intent)
-        }
+        // Only media-button intents are acted on: the service is exported for
+        // media browsers, so other apps can start it with arbitrary intents.
+        MediaButtonReceiver.handleIntent(session, intent)
         if (!wantPlaying && loadJob?.isActive != true && isForeground) leaveForeground(removeNotification = false)
         return START_NOT_STICKY
     }
@@ -530,6 +673,7 @@ class PlaybackService : Service(), PlayerCommands {
                 return@launch
             }
             consecutiveFailures = 0
+            lastError = null
             loadedUri = track.uri
             onTrackStarted(track)
         }
@@ -574,7 +718,8 @@ class PlaybackService : Service(), PlayerCommands {
     private fun failCurrent(track: Track, auto: Boolean) {
         consecutiveFailures++
         loadedUri = null
-        _messages.tryEmit(getString(R.string.error_cannot_play, track.title))
+        lastError = getString(R.string.error_cannot_play, track.title)
+        _messages.tryEmit(lastError!!)
         // Skip broken files during continuous playback, but never loop forever.
         if (auto && consecutiveFailures < MAX_SKIPS && queue.advance(auto = false) >= 0) {
             startCurrent(startMs = 0L, auto = true)
@@ -836,6 +981,7 @@ class PlaybackService : Service(), PlayerCommands {
             sleepTimerEndsAt = sleepDeadline,
             importing = importing,
         )
+        if (::browseTree.isInitialized) publishSessionQueue()
         updateSessionState()
     }
 
@@ -906,6 +1052,8 @@ class PlaybackService : Service(), PlayerCommands {
                 override fun onSkipToPrevious() = previous()
                 override fun onSeekTo(pos: Long) = seekTo(pos)
                 override fun onSkipToQueueItem(id: Long) = playIndex(id.toInt())
+                override fun onPlayFromMediaId(mediaId: String?, extras: Bundle?) = playMediaId(mediaId)
+                override fun onPlayFromSearch(query: String?, extras: Bundle?) = playFromSearch(query)
             })
             isActive = true
         }
@@ -925,14 +1073,19 @@ class PlaybackService : Service(), PlayerCommands {
                     PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or
                         PlaybackStateCompat.ACTION_PLAY_PAUSE or PlaybackStateCompat.ACTION_STOP or
                         PlaybackStateCompat.ACTION_SEEK_TO or PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
-                        PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or PlaybackStateCompat.ACTION_SKIP_TO_QUEUE_ITEM,
+                        PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or PlaybackStateCompat.ACTION_SKIP_TO_QUEUE_ITEM or
+                        PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID or PlaybackStateCompat.ACTION_PLAY_FROM_SEARCH,
                 )
                 .setState(
-                    playbackState,
+                    if (lastError != null && !wantPlaying) PlaybackStateCompat.STATE_ERROR else playbackState,
                     _position.value.positionMs,
                     if (wantPlaying) settings.speed else 0f,
                     SystemClock.elapsedRealtime(),
                 )
+                .setActiveQueueItemId(queue.currentIndex.toLong())
+                .apply {
+                    lastError?.let { setErrorMessage(PlaybackStateCompat.ERROR_CODE_UNKNOWN_ERROR, it) }
+                }
                 .build(),
         )
     }
@@ -1073,12 +1226,21 @@ class PlaybackService : Service(), PlayerCommands {
     companion object {
         const val CHANNEL_ID = "playback"
         const val NOTIFICATION_ID = 1
-        const val ACTION_STOP = "com.aiproject.musicplayer.STOP"
         private const val PRELOAD_WINDOW_MS = 20_000L
         private const val RESTART_THRESHOLD_MS = 3_000L
         private const val MIN_BOOKMARK_MS = 2_000L
         private const val SLEEP_FADE_MS = 30_000L
         private const val IDLE_STOP_MS = 10 * 60_000L
         private const val MAX_SKIPS = 5
+
+        /** Hosts allowed to read the library (they can always control playback). */
+        private val TRUSTED_BROWSERS = setOf(
+            "com.google.android.projection.gearhead",       // Android Auto
+            "com.google.android.carassistant",               // Assistant in the car
+            "com.google.android.googlequicksearchbox",       // Google Assistant
+            "com.android.car.media",                         // Android Automotive media centre
+            "com.android.systemui",                          // media controls
+            "com.android.bluetooth",                         // AVRCP browsing
+        )
     }
 }

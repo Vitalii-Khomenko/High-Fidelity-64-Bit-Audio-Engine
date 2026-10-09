@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android Auto browse icon (pixel style, tinted by the car UI). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="12"
+    android:viewportHeight="12">
+    <path android:fillColor="#FFFFFFFF" android:pathData="M1,2h7v1h-7z M1,4h7v1h-7z M1,6h4v1h-4z M9,2h1v6h-1z M10,2h1v1h-1z M7,7h3v3h-3z" />
+</vector>

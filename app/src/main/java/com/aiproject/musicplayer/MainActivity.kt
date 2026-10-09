@@ -1,6 +1,7 @@
 package com.aiproject.musicplayer
 
 import android.Manifest
+import android.app.SearchManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -8,6 +9,7 @@ import android.content.ServiceConnection
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.provider.MediaStore
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
@@ -31,11 +33,16 @@ class MainActivity : ComponentActivity() {
 
     private var service by mutableStateOf<PlaybackService?>(null)
     private var themeMode by mutableStateOf(ThemeMode.SYSTEM)
+    private var pendingSearch: String? = null   // voice query waiting for the service
     private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
             service = (binder as PlaybackService.LocalBinder).service
+            pendingSearch?.let { query ->
+                pendingSearch = null
+                service?.playFromSearch(query)
+            }
         }
 
         override fun onServiceDisconnected(name: ComponentName) {
@@ -49,6 +56,7 @@ class MainActivity : ComponentActivity() {
         themeMode = ThemeMode.fromId(uiPrefs.getInt(KEY_THEME, ThemeMode.SYSTEM.id))
         applySystemBars(themeMode)
         requestPermissionsOnce(uiPrefs)
+        handleVoiceSearch(intent)
         // Bound for the activity's whole life, not just while visible: system
         // pickers (folder chooser) stop this activity, and dropping the service
         // there tore down the UI that was waiting for the picker's result.
@@ -64,6 +72,18 @@ class MainActivity : ComponentActivity() {
                 },
             )
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleVoiceSearch(intent)
+    }
+
+    private fun handleVoiceSearch(intent: Intent?) {
+        if (intent?.action != MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH) return
+        val query = intent.getStringExtra(SearchManager.QUERY).orEmpty()
+        val bound = service
+        if (bound != null) bound.playFromSearch(query) else pendingSearch = query
     }
 
     override fun onDestroy() {

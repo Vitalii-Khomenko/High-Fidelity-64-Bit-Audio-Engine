@@ -72,6 +72,21 @@ against MockWebServer.
 (the UI takes plain state, so no service is needed). Paparazzi is not part of
 the main build because it downloads layoutlib and needs network access.
 
+## Android Auto
+
+`MediaBrowserInstrumentedTest` connects like Android Auto and checks the root
+of the browse tree (`connectedDebugAndroidTest`). For the real head unit:
+
+1. On the phone: Android Auto settings → tap the version ten times →
+   developer settings → enable **Unknown sources** (needed for apps not
+   installed from Google Play) and **Start head unit server**.
+2. On the computer: `sdkmanager "extras;google;auto"`, then
+   `adb forward tcp:5277 tcp:5277` and run `desktop-head-unit` from
+   `$ANDROID_HOME/extras/google/auto`.
+3. Check: Queue / Playlists / Folders browse, play from each, next/previous and
+   seek from the car, voice "play <title> on HiFi Player", an unreadable file
+   (error on the car screen), and phone-to-car hand-over while playing.
+
 ## On a real device
 
 Host tests cannot cover the audio HAL, Bluetooth or OEM power management.

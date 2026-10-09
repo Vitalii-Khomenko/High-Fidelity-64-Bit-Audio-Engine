@@ -68,6 +68,30 @@ it, renders `state` / `position` and calls `PlayerCommands`.
 - **Sleep timer** — lives in the service (monotonic clock), fades the volume over
   the last 30 seconds and pauses.
 
+## Android Auto
+
+`PlaybackService` extends `MediaBrowserServiceCompat`. Android Auto binds with
+the `MediaBrowserService` action and receives the browser binder; the app's own
+activity binds without an action and receives `LocalBinder`.
+
+| Node | Children |
+|---|---|
+| root | Queue, Playlists, Folders (browsable, list style) |
+| Queue | tracks of the queue (window of 300 around the current one) |
+| Playlists → playlist | saved playlists → their tracks |
+| Folders → folder | saved SAF folders → subfolders and tracks of that level |
+
+Media IDs (`playback/MediaIds.kt`) carry everything needed to play an item
+(queue index + URI, playlist id + index, tree URI + document id + index), Base64
+encoded. Picking a playlist or folder track replaces the queue with that list
+and starts at the item. Voice search matches queue titles, then playlists, then
+folders. `onGetRoot()` only gives the library to trusted hosts; everyone else
+gets an empty root but can still use the media session.
+
+Testing without a car: install the Desktop Head Unit from the SDK manager
+(`extras;google;auto`), enable developer mode and "Unknown sources" in Android
+Auto, then follow docs/TESTING.md.
+
 ## Persistence
 
 | Where | What |

@@ -44,7 +44,8 @@ Details: [docs/AUDIO_ENGINE.md](docs/AUDIO_ENGINE.md).
 
 Playback lives in a foreground service with a media session: notification,
 lock screen, headset and Bluetooth buttons, audio focus and "becoming noisy"
-all work without the UI. The visual design follows [airwitech.com](https://airwitech.com):
+all work without the UI. **Android Auto** shows the queue, saved playlists and
+folders and supports voice search ("play … on HiFi Player"). The visual design follows [airwitech.com](https://airwitech.com):
 ink and paper colours, violet / amber / cyan tones, Sora and Source Sans 3,
 square shapes, hairline rules and pixel glyphs.
 

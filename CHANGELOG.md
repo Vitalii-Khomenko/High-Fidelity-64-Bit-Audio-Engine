@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.0 — 2026-10-09
+
+### Android Auto
+
+- `PlaybackService` is now a media browser service: Android Auto (and Android Automotive, Assistant, AVRCP browsing) shows **Queue**, **Playlists** and **Folders** (saved SAF folders with subfolders) and plays what is picked there.
+- The session publishes the queue (up to 300 tracks around the current one), the active item, and supports play-from-media-id and voice search ("play … on HiFi Player"): queue titles, then playlist names, then folder names; an empty query resumes.
+- Errors (a file that cannot be opened) are shown on the car screen.
+- Only trusted hosts (Android Auto, Assistant, system UI, Bluetooth, the app itself) may read the library; any app can still control playback through the media session, as before.
+- The exported service ignores everything except media-button intents (the unused internal stop action was removed).
+- Voice search also works on the phone (`MEDIA_PLAY_FROM_SEARCH`).
+
 ## 0.9.2 — 2026-10-09
 
 Fixes for the code audit of 0.9.1 (IDs from `AUDIT_CODE_2026-10-09.md`).

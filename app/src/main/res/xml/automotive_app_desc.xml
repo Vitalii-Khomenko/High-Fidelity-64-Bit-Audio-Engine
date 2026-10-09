@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Declares this app as a media source for Android Auto. -->
+<automotiveApp>
+    <uses name="media" />
+</automotiveApp>
