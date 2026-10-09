@@ -1,0 +1,161 @@
+package com.aiproject.musicplayer.playback
+
+import android.content.Context
+import android.content.SharedPreferences
+import org.json.JSONArray
+import org.json.JSONObject
+
+/** Persisted settings; field ids match the keys used by earlier versions. */
+data class PlayerSettings(
+    val contentMode: ContentMode = ContentMode.MUSIC,
+    val speed: Float = 1f,
+    val speedMode: SpeedMode = SpeedMode.MUSIC,
+    val volume: Float = 1f,
+    val eq: EqSettings = EqSettings(),
+    val replayGain: ReplayGainMode = ReplayGainMode.TRACK,
+    val repeat: RepeatMode = RepeatMode.OFF,
+    val sortMode: SortMode = SortMode.NAME,
+)
+
+data class SavedQueue(
+    val tracks: List<Track>,
+    val index: Int,
+    val shuffle: Boolean,
+    val order: List<Int>,
+    val resumeUri: String?,
+    val resumePositionMs: Long,
+)
+
+/**
+ * SharedPreferences persistence for the queue, settings, per-track bookmarks
+ * ("Books" mode) and finished chapters. Reads the formats written by 0.8.x.
+ */
+class PlayerStore(context: Context) {
+    private val prefs: SharedPreferences = context.getSharedPreferences("player_state", Context.MODE_PRIVATE)
+    private val progress: SharedPreferences = context.getSharedPreferences("audiobook_progress", Context.MODE_PRIVATE)
+
+    fun loadSettings(): PlayerSettings = PlayerSettings(
+        contentMode = ContentMode.fromId(prefs.getInt(KEY_CONTENT_MODE, ContentMode.MUSIC.id)),
+        speed = PlaybackSpeed.clamp(prefs.getFloat(KEY_SPEED, 1f)),
+        speedMode = SpeedMode.fromId(prefs.getInt(KEY_SPEED_MODE, SpeedMode.MUSIC.id)),
+        volume = prefs.getFloat(KEY_VOLUME, 1f).takeIf { it.isFinite() }?.coerceIn(0f, 1f) ?: 1f,
+        eq = EqSettings.deserialize(prefs.getBoolean(KEY_EQ_ENABLED, false), prefs.getString(KEY_EQ_GAINS, null)),
+        replayGain = ReplayGainMode.fromId(prefs.getInt(KEY_REPLAY_GAIN, ReplayGainMode.TRACK.id)),
+        repeat = RepeatMode.fromId(prefs.getInt(KEY_REPEAT, RepeatMode.OFF.id)),
+        sortMode = SortMode.fromId(prefs.getInt(KEY_SORT_MODE, SortMode.NAME.id)),
+    )
+
+    fun saveSettings(s: PlayerSettings) {
+        prefs.edit()
+            .putInt(KEY_CONTENT_MODE, s.contentMode.id)
+            .putFloat(KEY_SPEED, s.speed)
+            .putInt(KEY_SPEED_MODE, s.speedMode.id)
+            .putFloat(KEY_VOLUME, s.volume)
+            .putBoolean(KEY_EQ_ENABLED, s.eq.enabled)
+            .putString(KEY_EQ_GAINS, s.eq.serialize())
+            .putInt(KEY_REPLAY_GAIN, s.replayGain.id)
+            .putInt(KEY_REPEAT, s.repeat.id)
+            .putInt(KEY_SORT_MODE, s.sortMode.id)
+            .apply()
+    }
+
+    fun loadQueue(): SavedQueue {
+        val tracks = decodeTracks(prefs.getString(KEY_QUEUE, null))
+        return SavedQueue(
+            tracks = tracks,
+            index = prefs.getInt(KEY_INDEX, -1),
+            shuffle = prefs.getBoolean(KEY_SHUFFLE, false),
+            order = decodeInts(prefs.getString(KEY_SHUFFLE_ORDER, null)),
+            resumeUri = prefs.getString(KEY_RESUME_URI, null),
+            resumePositionMs = prefs.getFloat(KEY_RESUME_POS, 0f).toLong(),
+        )
+    }
+
+    fun saveTracks(tracks: List<Track>) {
+        prefs.edit().putString(KEY_QUEUE, encodeTracks(tracks)).apply()
+    }
+
+    fun savePosition(index: Int, shuffle: Boolean, order: List<Int>) {
+        prefs.edit()
+            .putInt(KEY_INDEX, index)
+            .putBoolean(KEY_SHUFFLE, shuffle)
+            .putString(KEY_SHUFFLE_ORDER, JSONArray(order).toString())
+            .apply()
+    }
+
+    fun saveResumePoint(uri: String?, positionMs: Long) {
+        val editor = prefs.edit()
+        if (uri == null || positionMs <= 0L) editor.remove(KEY_RESUME_URI).remove(KEY_RESUME_POS)
+        else editor.putString(KEY_RESUME_URI, uri).putFloat(KEY_RESUME_POS, positionMs.toFloat())
+        editor.apply()
+    }
+
+    // ── Books mode ───────────────────────────────────────────────────────────
+
+    fun bookmark(uri: String): Long = prefs.getFloat(bookmarkKey(uri), 0f).toLong()
+
+    fun saveBookmark(uri: String, positionMs: Long) {
+        prefs.edit().putFloat(bookmarkKey(uri), positionMs.toFloat()).apply()
+    }
+
+    fun clearBookmark(uri: String) {
+        prefs.edit().remove(bookmarkKey(uri)).apply()
+    }
+
+    fun playedUris(): Set<String> = progress.getStringSet(KEY_PLAYED, emptySet())?.toSet() ?: emptySet()
+
+    fun savePlayedUris(uris: Set<String>) {
+        progress.edit().putStringSet(KEY_PLAYED, HashSet(uris)).apply()
+    }
+
+    private fun bookmarkKey(uri: String) = "pos_uri_$uri"
+
+    companion object {
+        private const val KEY_QUEUE = "playlist_json"
+        private const val KEY_INDEX = "current_index"
+        private const val KEY_SHUFFLE = "shuffle_enabled"
+        private const val KEY_SHUFFLE_ORDER = "shuffle_order_json"
+        private const val KEY_RESUME_URI = "saved_position_uri"
+        private const val KEY_RESUME_POS = "saved_position_ms"
+        private const val KEY_CONTENT_MODE = "playback_content_mode"
+        private const val KEY_SPEED = "playback_speed"
+        private const val KEY_SPEED_MODE = "playback_speed_mode"
+        private const val KEY_VOLUME = "volume"
+        private const val KEY_EQ_ENABLED = "eq_enabled"
+        private const val KEY_EQ_GAINS = "eq_gains"
+        private const val KEY_REPLAY_GAIN = "replaygain_mode"
+        private const val KEY_REPEAT = "repeat_mode"
+        private const val KEY_SORT_MODE = "playlist_sort_mode"
+        private const val KEY_PLAYED = "played_uris"
+
+        fun encodeTracks(tracks: List<Track>): String = JSONArray().apply {
+            tracks.forEach { t ->
+                put(JSONObject().put("uri", t.uri).put("name", t.title).put("folder", t.folder).put("durationMs", t.durationMs))
+            }
+        }.toString()
+
+        fun decodeTracks(json: String?): List<Track> {
+            if (json.isNullOrBlank()) return emptyList()
+            return try {
+                val array = JSONArray(json)
+                (0 until array.length()).mapNotNull { i ->
+                    val o = array.optJSONObject(i) ?: return@mapNotNull null
+                    val uri = o.optString("uri").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                    Track(uri, o.optString("name", uri), o.optString("folder", ""), o.optLong("durationMs", 0L))
+                }
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
+
+        private fun decodeInts(json: String?): List<Int> {
+            if (json.isNullOrBlank()) return emptyList()
+            return try {
+                val array = JSONArray(json)
+                (0 until array.length()).map { array.getInt(it) }
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
+    }
+}

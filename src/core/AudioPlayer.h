@@ -1,779 +1,698 @@
 #pragma once
 
-#include <thread>
-#include <atomic>
-#include <memory>
-#include <vector>
-#include <array>
-#include <chrono>
-#include <mutex>
-#include <cmath>
 #include <algorithm>
-#include <functional>
-#include <cstdlib>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+#include <sys/resource.h>
+#include <unistd.h>
 
 #include "AudioBuffer.h"
-#include "RingBuffer.h"
-#include "../dsp/GainProcessor.h"
-#include "../dsp/BiquadFilter.h"
-#include "../dsp/Fft.h"
-#include "../dsp/GraphicEqProcessor.h"
-#include "../dsp/TimeStretchProcessor.h"
 #include "../decoders/IAudioDecoder.h"
-#include "../decoders/DsdDecoder.h"
-#include "../hw/OboeAudioEndpoint.h"
+#include "../dsp/ChannelMixer.h"
+#include "../dsp/GraphicEqProcessor.h"
+#include "../dsp/SpectrumAnalyzer.h"
+#include "../dsp/TimeStretchProcessor.h"
+#include "../hw/OboeOutput.h"
 
 namespace audio_engine {
 namespace core {
 
+enum class PlayerState : int {
+    Idle = 0,     // nothing loaded
+    Paused = 1,   // loaded, not playing
+    Playing = 2,
+    Ended = 3,    // reached the end and the output has drained
+    Error = 4,    // output could not be opened
+};
+
+struct TrackInfo {
+    uint64_t serial = 0;
+    uint32_t sampleRate = 0;
+    uint32_t channels = 0;
+    uint32_t bitsPerSample = 0;
+    uint64_t totalFrames = 0;
+    uint32_t dsdRate = 0;
+    int codec = 0;
+    double gainDb = 0.0;   // applied ReplayGain
+};
+
+/**
+ * Playback engine: one decode thread feeding OboeOutput.
+ *
+ *   decoder -> EQ (+preamp) -> ReplayGain -> [time stretch] -> downmix -> ring
+ *   ring -> volume / fades / limiter -> device                (Oboe callback)
+ *
+ * Public methods may be called from any thread. Mutators are serialised by
+ * m_control; getters never wait for decoding or I/O.
+ *
+ * Position is derived from frames actually consumed by the device callback,
+ * through a list of segments that map output frames to source frames. Each
+ * seek, speed change and gapless track switch starts a segment at the output
+ * frame where it becomes audible, so the reported position and the "track
+ * changed" event follow what is heard, not what has been decoded.
+ */
 class AudioPlayer {
 public:
-    static constexpr size_t SPECTRUM_N     = 2048;
-    static constexpr int    SPECTRUM_BANDS = 32;
-    static constexpr size_t EDGE_RAMP_FRAMES = 384;
+    static constexpr size_t kChunkFrames = 1024;
+    static constexpr double kBufferSeconds = 0.3;
+    static constexpr double kEdgeRampSeconds = 0.004;
+    static constexpr int kPauseFadeMs = 40;
+    static constexpr int kSwitchFadeMs = 25;
 
-    AudioPlayer()
-        : m_isPlaying(false), m_stopThread(false),
-          m_seekRequest(-1), m_speed(1.0), m_userVolume(1.0),
-          m_gaplessAdvanced(false),
-          m_specWritePos(0),
-            m_ringBuffer(std::make_unique<RingBuffer<double>>(262144))
-    {
-        m_gainProcessor = std::make_unique<dsp::GainProcessor>();
-        m_eqProcessor   = std::make_unique<dsp::GraphicEqProcessor>();
-        m_timeStretchProcessor = std::make_unique<dsp::TimeStretchProcessor>();
-        m_endpoint      = std::make_unique<hw::OboeAudioEndpoint>(m_ringBuffer.get());
-        m_specBuf.fill(0.0f);
-        std::fill(std::begin(m_specSmooth), std::end(m_specSmooth), 0.0f);
+    AudioPlayer() : m_output(std::make_unique<hw::OboeOutput>()) {}
+    ~AudioPlayer() {
+        std::lock_guard<std::mutex> lock(m_control);
+        stopDecodeThread();
+        m_output.reset();
     }
 
-    ~AudioPlayer() { shutdownInternal(); }
+    AudioPlayer(const AudioPlayer&) = delete;
+    AudioPlayer& operator=(const AudioPlayer&) = delete;
 
-    // ── Decoder management ──────────────────────────────────────────────────
+    // ── Loading ──────────────────────────────────────────────────────────────
 
-    void setDecoder(std::unique_ptr<decoders::IAudioDecoder> decoder) {
-        pauseDecodeThread();
-        {
-            std::lock_guard<std::mutex> lk(m_decoderMutex);
-            m_decoder = std::move(decoder);
+    /** Replaces the current track. Leaves the player paused at frame 0. */
+    bool load(std::unique_ptr<decoders::IAudioDecoder> decoder, double gainLinear) {
+        if (!isUsable(decoder.get())) return false;
+        std::lock_guard<std::mutex> lock(m_control);
+        stopDecodeThread();
+        if (m_output->isRunRequested()) m_output->stop(kSwitchFadeMs);
+        clearNext();
+
+        const TrackInfo info = makeInfo(*decoder, gainLinear);
+        const bool sameFormat = m_output->isConfigured() &&
+            m_output->sampleRate() == info.sampleRate && m_decoderChannels == info.channels;
+        if (sameFormat) {
+            m_output->flush();
+        } else if (!m_output->configure(info.sampleRate, static_cast<int>(info.channels))) {
+            m_decoder.reset();
+            m_state.store(PlayerState::Error, std::memory_order_release);
+            return false;
         }
-        // Clear any pre-loaded next decoder
+        m_decoder = std::move(decoder);
+        m_gainLinear = gainLinear;
+        prepareDsp(info.sampleRate, info.channels);
+        m_seekRequest.store(-1, std::memory_order_release);
+        m_startRampRemaining = m_edgeRampFrames;
         {
-            std::lock_guard<std::mutex> lk(m_nextDecoderMutex);
-            m_nextDecoder.reset();
+            std::lock_guard<std::mutex> infoLock(m_infoMutex);
+            m_current = info;
+            m_segments.clear();
+            m_segments.push_back(Segment{m_output->consumedFrames(), 0.0, currentRate(), info});
         }
-        m_seekRequest.store(-1, std::memory_order_relaxed);
-        const uint32_t sr = m_decoder->getSampleRate();
-        const size_t   ch = m_decoder->getNumChannels();
-        m_gainProcessor->prepare(sr, 1024);
-        m_eqProcessor->prepare(sr, 1024);
-        applyPendingEqConfiguration();
-        m_timeStretchProcessor->prepare(sr, ch);
-        m_timeStretchProcessor->setSpeed(m_speed.load(std::memory_order_relaxed));
-        m_gainProcessor->forceSilence();
-        if (!m_endpoint->isInitialized() ||
-            m_endpoint->getStreamSampleRate()   != static_cast<int32_t>(sr) ||
-            m_endpoint->getStreamChannelCount() != static_cast<int32_t>(ch))
-        {
-            m_endpoint->terminate();
-            if (!m_endpoint->initialize(sr, ch)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                m_endpoint->initialize(sr, ch);
-            }
-        }
-        m_ringBuffer->clear();
-        m_timeStretchProcessor->reset();
-        resetPositionState(0.0);
-        m_startRampFramesRemaining = EDGE_RAMP_FRAMES;
-        m_gaplessBlendPending = false;
-        m_tailValidFrames = 0;
-        m_tailInterleaved.assign(EDGE_RAMP_FRAMES * ch, 0.0);
+        m_trackAdvanced.store(false, std::memory_order_release);
+        m_state.store(PlayerState::Paused, std::memory_order_release);
+        return true;
     }
 
-    // Pre-load next track for gapless transition.
-    // Called while current track is still playing (~8 s before end).
-    void setNextDecoder(std::unique_ptr<decoders::IAudioDecoder> next, float rgDb) {
-        std::lock_guard<std::mutex> lk(m_nextDecoderMutex);
-        m_nextDecoder    = std::move(next);
-        m_nextReplayGainDb = rgDb;
+    /** Queues the next track for a gapless (or near-gapless) transition. */
+    void setNext(std::unique_ptr<decoders::IAudioDecoder> decoder, double gainLinear) {
+        if (!isUsable(decoder.get())) return;
+        std::lock_guard<std::mutex> lock(m_nextMutex);
+        m_next = std::move(decoder);
+        m_nextGain = gainLinear;
     }
 
-    void clearNextDecoder() {
-        std::lock_guard<std::mutex> lk(m_nextDecoderMutex);
-        m_nextDecoder.reset();
+    void clearNext() {
+        std::lock_guard<std::mutex> lock(m_nextMutex);
+        m_next.reset();
+    }
+
+    bool hasNext() const {
+        std::lock_guard<std::mutex> lock(m_nextMutex);
+        return m_next != nullptr;
     }
 
     // ── Transport ────────────────────────────────────────────────────────────
 
-    void play() {
-        if (!m_decoder) return;
-        if (m_isPlaying.load()) return;
-        if (!m_endpoint->isRunning()) {
-            const uint32_t sr = m_decoder->getSampleRate();
-            const size_t   ch = m_decoder->getNumChannels();
-            m_endpoint->terminate();
-            m_endpoint->initialize(sr, ch);
+    bool play() {
+        std::lock_guard<std::mutex> lock(m_control);
+        const PlayerState s = m_state.load(std::memory_order_acquire);
+        if (!m_decoder || s == PlayerState::Idle || s == PlayerState::Error) return false;
+        if (s == PlayerState::Playing) return true;
+        if (s == PlayerState::Ended) seekLocked(0);
+        startDecodeThread();
+        if (!m_output->start()) {
+            stopDecodeThread();
+            m_state.store(PlayerState::Error, std::memory_order_release);
+            return false;
         }
-        m_ringBuffer->clear();
-        m_timeStretchProcessor->clearEndOfInput();
-        m_stopThread.store(false, std::memory_order_relaxed);
-        startPositionClock();
-        m_isPlaying.store(true,  std::memory_order_release);
-        if (m_decodeThread.joinable()) m_decodeThread.join();
-        m_decodeThread = std::thread([this]() { decodeLoop(); });
+        m_state.store(PlayerState::Playing, std::memory_order_release);
+        return true;
     }
 
-    void pause() { pauseDecodeThread(); }
+    void pause() {
+        std::lock_guard<std::mutex> lock(m_control);
+        if (m_state.load(std::memory_order_acquire) != PlayerState::Playing) return;
+        stopDecodeThread();
+        m_output->stop(kPauseFadeMs);
+        applyPendingSeek();
+        // The decode thread may have reached the end while we waited.
+        if (m_state.load(std::memory_order_acquire) == PlayerState::Playing) {
+            m_state.store(PlayerState::Paused, std::memory_order_release);
+        }
+    }
 
-    // ── Seeking & metadata ───────────────────────────────────────────────────
+    void stop() {
+        std::lock_guard<std::mutex> lock(m_control);
+        stopDecodeThread();
+        if (m_output->isRunRequested()) m_output->stop(kPauseFadeMs);
+        m_seekRequest.store(-1, std::memory_order_release);
+        if (m_decoder) {
+            seekLocked(0);
+            m_state.store(PlayerState::Paused, std::memory_order_release);
+        }
+    }
 
     void seekToMs(double ms) {
-        uint32_t sr = 0;
-        uint64_t total = 0;
-        {
-            std::lock_guard<std::mutex> lk(m_decoderMutex);
-            if (!m_decoder) return;
-            sr = m_decoder->getSampleRate();
-            if (sr == 0) return;
-            total = m_decoder->getTotalFrames();
+        if (!std::isfinite(ms)) return;
+        std::lock_guard<std::mutex> lock(m_control);
+        if (!m_decoder) return;
+        const uint32_t sr = m_decoder->getSampleRate();
+        const uint64_t total = m_decoder->getTotalFrames();
+        double frame = std::max(0.0, ms) * sr / 1000.0;
+        if (total > 0) frame = std::min(frame, static_cast<double>(total > 1 ? total - 1 : 0));
+        const int64_t target = static_cast<int64_t>(frame);
+        if (m_threadRunning.load(std::memory_order_acquire)) {
+            m_seekRequest.store(target, std::memory_order_release);
+        } else {
+            m_seekRequest.store(-1, std::memory_order_release);
+            seekLocked(target);
+            if (m_state.load(std::memory_order_acquire) == PlayerState::Ended) {
+                m_state.store(PlayerState::Paused, std::memory_order_release);
+            }
         }
-
-        uint64_t targetFrame = static_cast<uint64_t>((ms / 1000.0) * sr);
-        if (total > 0 && targetFrame >= total) targetFrame = total > 1 ? total - 2 : 0;
-        const double targetMs = (static_cast<double>(targetFrame) / sr) * 1000.0;
-        m_seekRequest.store(static_cast<int64_t>(targetFrame), std::memory_order_release);
-        resetPositionState(targetMs);
     }
 
-    double getDurationMs() const {
-        std::lock_guard<std::mutex> lk(m_decoderMutex);
-        if (!m_decoder) return 0.0;
-        const uint64_t frames = m_decoder->getTotalFrames();
-        const uint32_t sr     = m_decoder->getSampleRate();
-        if (sr == 0) return 0.0;
-        return (static_cast<double>(frames) / sr) * 1000.0;
-    }
+    // ── Controls ─────────────────────────────────────────────────────────────
 
-    double getPositionMs() const {
-        const int64_t  pending = m_seekRequest.load(std::memory_order_acquire);
-        uint32_t sr = 0;
-        uint64_t totalFrames = 0;
-        {
-            std::lock_guard<std::mutex> lk(m_decoderMutex);
-            if (!m_decoder) return 0.0;
-            sr = m_decoder->getSampleRate();
-            totalFrames = m_decoder->getTotalFrames();
-        }
-        if (sr == 0) return 0.0;
-        if (pending >= 0) return (static_cast<double>(pending) / sr) * 1000.0;
-
-        const double durationMs = totalFrames > 0
-            ? (static_cast<double>(totalFrames) / sr) * 1000.0
-            : 0.0;
-        const double positionMs = getTrackedPositionMs();
-        return durationMs > 0.0 ? std::clamp(positionMs, 0.0, durationMs) : std::max(0.0, positionMs);
-    }
-
-    // ── DSP controls ─────────────────────────────────────────────────────────
-
-    void setVolume(double v) {
-        m_userVolume.store(v, std::memory_order_relaxed);
-        m_gainProcessor->setGainLinear(v);
-    }
-
-    void forceSilence() {
-        m_gainProcessor->forceSilence();
-    }
-
-    void clearBufferedAudio() {
-        m_ringBuffer->clear();
-    }
+    void setVolume(double linear) { m_output->setVolume(linear); }
 
     void setSpeed(double speed) {
-        if (speed < 0.75) speed = 0.75;
-        if (speed > 2.0)  speed = 2.0;
-        snapshotPositionClock();
-        const double previous = m_speed.load(std::memory_order_relaxed);
-        const bool wasNormal = isNormalPlaybackSpeed(previous);
-        const bool nowNormal = isNormalPlaybackSpeed(speed);
-        m_speed.store(speed, std::memory_order_relaxed);
-        if (wasNormal != nowNormal) {
-            m_speedPathChangePending.store(true, std::memory_order_release);
-        }
+        if (!std::isfinite(speed)) return;
+        m_speed.store(std::clamp(speed, 0.5, 2.0), std::memory_order_release);
     }
 
     void setSpeedMode(int mode) {
-        const int normalizedMode = (mode == 1) ? 1 : 0;
-        const int previousMode = m_speedMode.load(std::memory_order_relaxed);
-        m_speedMode.store(normalizedMode, std::memory_order_relaxed);
-        if (previousMode != normalizedMode) {
-            m_speedModeChangePending.store(true, std::memory_order_release);
+        const int normalized = mode == 1 ? 1 : 0;
+        if (m_speedMode.exchange(normalized, std::memory_order_acq_rel) != normalized) {
+            m_speedModeDirty.store(true, std::memory_order_release);
         }
     }
-
-    void setReplayGainDb(float db) { m_gainProcessor->setReplayGainDb(db); }
-    float getReplayGainDb()  const { return m_gainProcessor->getReplayGainDb(); }
 
     void setEqEnabled(bool enabled) {
-        {
-            std::lock_guard<std::mutex> lk(m_eqConfigMutex);
-            m_eqEnabled = enabled;
-        }
-        m_eqConfigDirty.store(true, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(m_eqMutex);
+        m_eqEnabled = enabled;
+        m_eqDirty.store(true, std::memory_order_release);
     }
 
-    void setEqBandGain(size_t bandIndex, double gainDb) {
-        if (bandIndex >= m_eqBandGainsDb.size()) return;
-        {
-            std::lock_guard<std::mutex> lk(m_eqConfigMutex);
-            m_eqBandGainsDb[bandIndex] = gainDb;
-        }
-        m_eqConfigDirty.store(true, std::memory_order_release);
+    void setEqBandGain(size_t band, double gainDb) {
+        if (band >= m_eqGains.size() || !std::isfinite(gainDb)) return;
+        std::lock_guard<std::mutex> lock(m_eqMutex);
+        m_eqGains[band] = std::clamp(gainDb, -12.0, 12.0);
+        m_eqDirty.store(true, std::memory_order_release);
     }
 
-    void resetEqBands() {
-        {
-            std::lock_guard<std::mutex> lk(m_eqConfigMutex);
-            m_eqEnabled = false;
-            m_eqBandGainsDb.fill(0.0);
-        }
-        m_eqConfigDirty.store(true, std::memory_order_release);
+    void resetEq() {
+        std::lock_guard<std::mutex> lock(m_eqMutex);
+        m_eqEnabled = false;
+        m_eqGains.fill(0.0);
+        m_eqDirty.store(true, std::memory_order_release);
     }
 
-    // ── Spectrum ─────────────────────────────────────────────────────────────
+    // ── Queries (never block on decoding) ────────────────────────────────────
 
-    void getSpectrumBands(float* bands, int bandCount, uint32_t sampleRate) const {
-        if (!bands || bandCount <= 0) return;
-        // Decay to zero when not playing
-        if (!m_isPlaying.load(std::memory_order_relaxed) || sampleRate == 0) {
-            std::lock_guard<std::mutex> lk(m_specMutex);
-            for (int i = 0; i < bandCount; ++i) {
-                m_specSmooth[i] *= 0.82f;
-                bands[i] = m_specSmooth[i];
-            }
+    PlayerState state() const { return m_state.load(std::memory_order_acquire); }
+
+    double positionMs() const {
+        std::lock_guard<std::mutex> lock(m_infoMutex);
+        promoteLocked();
+        const uint32_t sr = m_current.sampleRate;
+        if (sr == 0) return 0.0;
+        const int64_t pending = m_seekRequest.load(std::memory_order_acquire);
+        double frames = pending >= 0 ? static_cast<double>(pending) : sourceFrameLocked(m_output->consumedFrames());
+        if (m_current.totalFrames > 0) frames = std::min(frames, static_cast<double>(m_current.totalFrames));
+        return std::max(0.0, frames) * 1000.0 / sr;
+    }
+
+    double durationMs() const {
+        std::lock_guard<std::mutex> lock(m_infoMutex);
+        promoteLocked();
+        return m_current.sampleRate ? m_current.totalFrames * 1000.0 / m_current.sampleRate : 0.0;
+    }
+
+    TrackInfo trackInfo() const {
+        std::lock_guard<std::mutex> lock(m_infoMutex);
+        promoteLocked();
+        return m_current;
+    }
+
+    uint32_t outputSampleRate() const { return m_output->isConfigured() ? m_output->sampleRate() : 0; }
+    int outputChannels() const { return m_output->isConfigured() ? m_output->channels() : 0; }
+    uint64_t underrunCount() const { return m_output->underrunCount(); }
+
+    /** True once after the audible track changed through a gapless transition. */
+    bool consumeTrackAdvanced() {
+        {
+            std::lock_guard<std::mutex> lock(m_infoMutex);
+            promoteLocked();
+        }
+        return m_trackAdvanced.exchange(false, std::memory_order_acq_rel);
+    }
+
+    void spectrum(float* bands, int count) {
+        if (!bands || count <= 0) return;
+        std::lock_guard<std::mutex> lock(m_spectrumMutex);
+        std::fill(bands, bands + count, 0.0f);
+        if (state() != PlayerState::Playing || !m_output->isConfigured()) {
+            m_analyzer.decay(bands, count);
             return;
         }
-        // Snapshot the circular buffer quickly, then perform the FFT work outside
-        // the mutex so the decode thread is not blocked by UI spectrum polling.
-        std::array<float, SPECTRUM_N> specSnapshot{};
-        size_t wp = 0;
-        {
-            std::lock_guard<std::mutex> lk(m_specMutex);
-            specSnapshot = m_specBuf;
-            wp = m_specWritePos.load(std::memory_order_acquire);
-        }
-
-        // Copy circular buffer (oldest -> newest)
-        std::array<double, SPECTRUM_N> re{}, im{};
-        for (size_t i = 0; i < SPECTRUM_N; ++i) {
-            const size_t idx = (wp + i) % SPECTRUM_N;
-            const double w = 0.5 * (1.0 - std::cos(2.0 * M_PI * i / (SPECTRUM_N - 1)));
-            re[i] = static_cast<double>(specSnapshot[idx]) * w;
-        }
-        dsp::fft(re.data(), im.data(), static_cast<int>(SPECTRUM_N));
-
-        const double fMin = 20.0, fMax = 20000.0;
-        const double logRange = std::log10(fMax / fMin);
-
-        std::lock_guard<std::mutex> lk(m_specMutex);
-        for (int b = 0; b < bandCount; ++b) {
-            const double freqLo = fMin * std::pow(10.0, logRange *  b      / bandCount);
-            const double freqHi = fMin * std::pow(10.0, logRange * (b + 1) / bandCount);
-            const int binLo = std::max(1, static_cast<int>(freqLo * SPECTRUM_N / sampleRate));
-            const int binHi = std::min(static_cast<int>(SPECTRUM_N / 2),
-                                       static_cast<int>(freqHi * SPECTRUM_N / sampleRate) + 1);
-            double mag = 0.0;
-            for (int k = binLo; k < binHi; ++k) {
-                const double m = std::sqrt(re[k]*re[k] + im[k]*im[k]) / (SPECTRUM_N / 2);
-                if (m > mag) mag = m;
-            }
-            const double dB = 20.0 * std::log10(mag + 1e-7);
-            float norm = static_cast<float>((dB + 60.0) / 60.0);
-            norm = std::max(0.0f, std::min(1.0f, norm));
-            if (norm > m_specSmooth[b])
-                m_specSmooth[b] = m_specSmooth[b] * 0.25f + norm * 0.75f; // fast attack
-            else
-                m_specSmooth[b] *= 0.87f;                                  // slow decay
-            bands[b] = m_specSmooth[b];
-        }
-    }
-
-    // ── State queries ────────────────────────────────────────────────────────
-
-    bool     isPlaying()       const { return m_isPlaying.load(std::memory_order_relaxed); }
-    uint32_t getSampleRate()   const {
-        std::lock_guard<std::mutex> lk(m_decoderMutex);
-        return m_decoder ? m_decoder->getSampleRate() : 0;
-    }
-    uint32_t getBitsPerSample() const {
-        std::lock_guard<std::mutex> lk(m_decoderMutex);
-        return m_decoder ? m_decoder->getBitsPerSample() : 0;
-    }
-    uint32_t getDsdNativeRate() const {
-        std::lock_guard<std::mutex> lk(m_decoderMutex);
-        if (!m_decoder) return 0;
-        auto* dsd = dynamic_cast<const decoders::DsdDecoder*>(m_decoder.get());
-        return dsd ? dsd->getDsdNativeRate() : 0;
-    }
-
-    // Returns true (once) if a gapless track advance just occurred.
-    bool pollGaplessAdvanced() {
-        return m_gaplessAdvanced.exchange(false, std::memory_order_acq_rel);
+        m_output->copySpectrum(m_spectrumSamples.data(), m_spectrumSamples.size());
+        m_analyzer.analyze(m_spectrumSamples.data(), m_output->sampleRate(), bands, count);
     }
 
 private:
-    static bool isNormalPlaybackSpeed(double speed) {
-        return speed > 0.99 && speed < 1.01;
+    struct Segment {
+        uint64_t startOut;      // consumed-frame index where it becomes audible
+        double startSource;     // source frame at startOut
+        double rate;            // source frames per output frame
+        TrackInfo info;
+    };
+
+    static bool isUsable(const decoders::IAudioDecoder* d) {
+        return d && d->getSampleRate() > 0 && d->getNumChannels() > 0 && d->getNumChannels() <= 8;
     }
 
-    double getTrackedPositionMs() const {
-        std::lock_guard<std::mutex> lk(m_positionMutex);
-        double positionMs = m_positionBaseMs;
-        if (m_positionClockRunning) {
-            const auto now = std::chrono::steady_clock::now();
-            const auto elapsedMs = std::chrono::duration<double, std::milli>(now - m_positionClockStart).count();
-            positionMs += elapsedMs * m_speed.load(std::memory_order_relaxed);
+    TrackInfo makeInfo(const decoders::IAudioDecoder& d, double gainLinear) {
+        TrackInfo info;
+        info.serial = ++m_serial;
+        info.sampleRate = d.getSampleRate();
+        info.channels = static_cast<uint32_t>(d.getNumChannels());
+        info.bitsPerSample = d.getBitsPerSample();
+        info.totalFrames = d.getTotalFrames();
+        info.dsdRate = d.getDsdRate();
+        info.codec = static_cast<int>(d.getCodec());
+        info.gainDb = gainLinear > 0.0 ? 20.0 * std::log10(gainLinear) : 0.0;
+        return info;
+    }
+
+    static bool isNormalSpeed(double speed) { return speed > 0.995 && speed < 1.005; }
+    double currentRate() const {
+        const double speed = m_speed.load(std::memory_order_acquire);
+        return isNormalSpeed(speed) ? 1.0 : speed;
+    }
+
+    // ── Position segments (m_infoMutex) ──────────────────────────────────────
+
+    void promoteLocked() const {
+        const uint64_t consumed = m_output->consumedFrames();
+        while (m_segments.size() > 1 && m_segments[1].startOut <= consumed) m_segments.pop_front();
+        if (!m_segments.empty() && m_segments.front().info.serial != m_current.serial) {
+            m_current = m_segments.front().info;
+            m_trackAdvanced.store(true, std::memory_order_release);
         }
-        return positionMs;
     }
 
-    void snapshotPositionClock() {
-        std::lock_guard<std::mutex> lk(m_positionMutex);
-        if (!m_positionClockRunning) return;
-        const auto now = std::chrono::steady_clock::now();
-        const auto elapsedMs = std::chrono::duration<double, std::milli>(now - m_positionClockStart).count();
-        m_positionBaseMs += elapsedMs * m_speed.load(std::memory_order_relaxed);
-        m_positionClockStart = now;
+    double sourceFrameLocked(uint64_t outFrame) const {
+        if (m_segments.empty()) return 0.0;
+        const Segment* seg = &m_segments.front();
+        for (const Segment& s : m_segments) {
+            if (s.startOut <= outFrame) seg = &s; else break;
+        }
+        const double delta = outFrame > seg->startOut ? static_cast<double>(outFrame - seg->startOut) : 0.0;
+        return seg->startSource + delta * seg->rate;
     }
 
-    void startPositionClock() {
-        std::lock_guard<std::mutex> lk(m_positionMutex);
-        m_positionClockStart = std::chrono::steady_clock::now();
-        m_positionClockRunning = true;
+    /** Source frame of the newest audio written into the ring. */
+    double writeHeadSourceFrame() {
+        std::lock_guard<std::mutex> lock(m_infoMutex);
+        if (m_segments.empty()) return 0.0;
+        const Segment& last = m_segments.back();
+        const uint64_t written = m_output->writtenFrames();
+        const double delta = written > last.startOut ? static_cast<double>(written - last.startOut) : 0.0;
+        return last.startSource + delta * last.rate;
     }
 
-    void stopPositionClock() {
-        snapshotPositionClock();
-        std::lock_guard<std::mutex> lk(m_positionMutex);
-        m_positionClockRunning = false;
+    double audibleSourceFrame() {
+        std::lock_guard<std::mutex> lock(m_infoMutex);
+        promoteLocked();
+        return sourceFrameLocked(m_output->consumedFrames());
     }
 
-    void resetPositionState(double positionMs) {
-        std::lock_guard<std::mutex> lk(m_positionMutex);
-        m_positionBaseMs = std::max(0.0, positionMs);
-        m_positionClockStart = std::chrono::steady_clock::now();
-        m_positionClockRunning = m_isPlaying.load(std::memory_order_relaxed);
+    void resetSegments(double sourceFrame, const TrackInfo& info) {
+        std::lock_guard<std::mutex> lock(m_infoMutex);
+        m_segments.clear();
+        m_segments.push_back(Segment{m_output->writtenFrames(), sourceFrame, currentRate(), info});
+        promoteLocked();
     }
 
-    void applyPendingEqConfiguration() {
-        if (!m_eqConfigDirty.exchange(false, std::memory_order_acq_rel)) return;
+    void appendSegment(uint64_t startOut, double sourceFrame, double rate, const TrackInfo& info) {
+        std::lock_guard<std::mutex> lock(m_infoMutex);
+        while (m_segments.size() > 64) m_segments.pop_front();
+        m_segments.push_back(Segment{startOut, sourceFrame, rate, info});
+    }
 
+    TrackInfo decoderInfo() {
+        std::lock_guard<std::mutex> lock(m_infoMutex);
+        return m_segments.empty() ? m_current : m_segments.back().info;
+    }
+
+    // ── DSP (owned by the decode thread while it runs) ───────────────────────
+
+    void prepareDsp(uint32_t sampleRate, uint32_t channels) {
+        m_decoderChannels = channels;
+        m_outChannels = static_cast<uint32_t>(m_output->channels());
+        m_downmix.configure(channels);
+        m_eq.prepare(sampleRate, kChunkFrames);
+        m_eqDirty.store(true, std::memory_order_release);
+        applyEq();
+        m_stretch.prepare(sampleRate, channels);
+        m_stretch.setMode(m_speedMode.load(std::memory_order_acquire) == 1
+            ? dsp::TimeStretchMode::Speech : dsp::TimeStretchMode::Music);
+        m_speedModeDirty.store(false, std::memory_order_release);
+        m_stretch.setSpeed(m_speed.load(std::memory_order_acquire));
+        m_appliedSpeed = m_speed.load(std::memory_order_acquire);
+        m_normalPath = isNormalSpeed(m_appliedSpeed);
+        m_inputExhausted = false;
+        m_source = AudioBuffer(channels, kChunkFrames * 2, sampleRate);
+        m_work.assign(kChunkFrames * 4 * channels, 0.0);
+        m_targetFrames = static_cast<size_t>(sampleRate * kBufferSeconds);
+        m_edgeRampFrames = std::max<size_t>(1, static_cast<size_t>(sampleRate * kEdgeRampSeconds));
+    }
+
+    void applyEq() {
+        if (!m_eqDirty.exchange(false, std::memory_order_acq_rel)) return;
         std::array<double, dsp::GraphicEqProcessor::BandCount> gains{};
-        bool enabled = false;
+        bool enabled;
         {
-            std::lock_guard<std::mutex> lk(m_eqConfigMutex);
-            gains = m_eqBandGainsDb;
+            std::lock_guard<std::mutex> lock(m_eqMutex);
+            gains = m_eqGains;
             enabled = m_eqEnabled;
         }
-
-        m_eqProcessor->setEnabled(enabled);
-        for (size_t index = 0; index < gains.size(); ++index) {
-            m_eqProcessor->setBandGain(index, gains[index]);
+        m_eq.setEnabled(enabled);
+        double maxBoost = 0.0;
+        for (size_t i = 0; i < gains.size(); ++i) {
+            m_eq.setBandGain(i, gains[i]);
+            maxBoost = std::max(maxBoost, gains[i]);
         }
+        // Automatic preamp keeps boosted bands from clipping.
+        m_eqPreamp = enabled ? std::pow(10.0, -maxBoost / 20.0) : 1.0;
     }
 
-    void clearBufferTail(AudioBuffer& buffer, size_t validFrames) {
-        const size_t totalFrames = buffer.getNumFrames();
-        if (validFrames >= totalFrames) return;
-        const size_t channels = buffer.getNumChannels();
-        for (size_t ch = 0; ch < channels; ++ch) {
-            double* data = buffer.getWritePointer(ch);
-            std::fill(data + validFrames, data + totalFrames, 0.0);
-        }
+    // A seek requested while the thread was stopping is applied synchronously.
+    void applyPendingSeek() {
+        const int64_t pending = m_seekRequest.exchange(-1, std::memory_order_acq_rel);
+        if (pending >= 0) seekLocked(pending);
     }
 
-    void applyStartRamp(double* interleaved, size_t frames, size_t channels) {
-        if (m_startRampFramesRemaining == 0 || !interleaved) return;
-        const size_t rampFrames = std::min(frames, m_startRampFramesRemaining);
-        const size_t offset = EDGE_RAMP_FRAMES - m_startRampFramesRemaining;
-        for (size_t f = 0; f < rampFrames; ++f) {
-            const double gain = static_cast<double>(offset + f + 1)
-                              / static_cast<double>(EDGE_RAMP_FRAMES);
-            for (size_t ch = 0; ch < channels; ++ch) {
-                interleaved[f * channels + ch] *= gain;
-            }
-        }
-        m_startRampFramesRemaining -= rampFrames;
+    void seekLocked(int64_t frame) {
+        if (!m_decoder) return;
+        m_decoder->seekToFrame(static_cast<uint64_t>(std::max<int64_t>(frame, 0)));
+        m_output->flush();
+        m_eq.reset();
+        m_stretch.reset();
+        m_stretch.setSpeed(m_speed.load(std::memory_order_acquire));
+        m_inputExhausted = false;
+        m_startRampRemaining = m_edgeRampFrames;
+        // Clear only the request we served; a newer one stays queued.
+        int64_t served = frame;
+        m_seekRequest.compare_exchange_strong(served, -1, std::memory_order_acq_rel);
+        resetSegments(static_cast<double>(frame), decoderInfo());
     }
 
-    void applyTailRamp(double* interleaved, size_t frames, size_t channels) {
-        if (!interleaved || frames == 0) return;
-        const size_t rampFrames = std::min(frames, EDGE_RAMP_FRAMES);
-        for (size_t i = 0; i < rampFrames; ++i) {
-            const size_t frameIndex = frames - rampFrames + i;
-            const double gain = static_cast<double>(rampFrames - i - 1)
-                              / static_cast<double>(rampFrames);
-            for (size_t ch = 0; ch < channels; ++ch) {
-                interleaved[frameIndex * channels + ch] *= gain;
-            }
-        }
+    // ── Decode thread ────────────────────────────────────────────────────────
+
+    void startDecodeThread() {
+        if (m_threadRunning.load(std::memory_order_acquire)) return;
+        if (m_thread.joinable()) m_thread.join();
+        m_stopThread.store(false, std::memory_order_release);
+        m_threadRunning.store(true, std::memory_order_release);
+        m_thread = std::thread([this] { decodeLoop(); });
     }
 
-    void applyGaplessBlend(double* interleaved, size_t frames, size_t channels) {
-        if (!m_gaplessBlendPending || !interleaved || m_tailValidFrames == 0) return;
-        const size_t blendFrames = std::min({frames, m_tailValidFrames, EDGE_RAMP_FRAMES});
-        const size_t tailOffset = (m_tailValidFrames - blendFrames) * channels;
-        for (size_t f = 0; f < blendFrames; ++f) {
-            const double wet = static_cast<double>(f + 1) / static_cast<double>(blendFrames + 1);
-            const double dry = 1.0 - wet;
-            for (size_t ch = 0; ch < channels; ++ch) {
-                const double prev = m_tailInterleaved[tailOffset + f * channels + ch];
-                interleaved[f * channels + ch] = prev * dry + interleaved[f * channels + ch] * wet;
-            }
-        }
-        m_gaplessBlendPending = false;
+    void stopDecodeThread() {
+        m_stopThread.store(true, std::memory_order_release);
+        if (m_thread.joinable()) m_thread.join();
+        m_threadRunning.store(false, std::memory_order_release);
     }
 
-    void updateTailHistory(const double* interleaved, size_t frames, size_t channels) {
-        if (!interleaved || channels == 0) return;
-        if (m_tailInterleaved.size() != EDGE_RAMP_FRAMES * channels) {
-            m_tailInterleaved.assign(EDGE_RAMP_FRAMES * channels, 0.0);
-            m_tailValidFrames = 0;
-        }
-
-        if (frames >= EDGE_RAMP_FRAMES) {
-            const size_t startFrame = frames - EDGE_RAMP_FRAMES;
-            std::copy(
-                interleaved + startFrame * channels,
-                interleaved + frames * channels,
-                m_tailInterleaved.begin()
-            );
-            m_tailValidFrames = EDGE_RAMP_FRAMES;
-            return;
-        }
-
-        const size_t keepFrames = std::min(m_tailValidFrames, EDGE_RAMP_FRAMES - frames);
-        if (keepFrames > 0) {
-            std::move(
-                m_tailInterleaved.begin() + (m_tailValidFrames - keepFrames) * channels,
-                m_tailInterleaved.begin() + m_tailValidFrames * channels,
-                m_tailInterleaved.begin()
-            );
-        }
-        std::copy(
-            interleaved,
-            interleaved + frames * channels,
-            m_tailInterleaved.begin() + keepFrames * channels
-        );
-        m_tailValidFrames = keepFrames + frames;
-    }
-
-    void pauseDecodeThread() {
-        stopPositionClock();
-        m_stopThread.store(true,  std::memory_order_release);
-        m_isPlaying.store(false, std::memory_order_release);
-        if (m_decodeThread.joinable()) m_decodeThread.join();
-        m_ringBuffer->clear();
-        m_timeStretchProcessor->reset();
-    }
-
-    void shutdownInternal() {
-        pauseDecodeThread();
-        m_endpoint->terminate();
-    }
-
-    // Write mono mix of a frame block into the spectrum circular buffer.
-    void updateSpectrum(const double* interleaved, size_t frames, size_t channels) {
-        // Hold the spectrum mutex so getSpectrumBands() on another thread
-        // never reads a partially-written circular buffer (data race / UB).
-        std::lock_guard<std::mutex> lk(m_specMutex);
-        for (size_t f = 0; f < frames; ++f) {
-            float mono = 0.0f;
-            for (size_t c = 0; c < channels; ++c)
-                mono += static_cast<float>(interleaved[f * channels + c]);
-            mono /= static_cast<float>(channels);
-            const size_t pos = m_specWritePos.fetch_add(1, std::memory_order_relaxed) % SPECTRUM_N;
-            m_specBuf[pos] = mono;
-        }
-    }
+    bool stopRequested() const { return m_stopThread.load(std::memory_order_acquire); }
 
     void decodeLoop() {
-        constexpr size_t CHUNK_FRAMES = 1024;
-        constexpr size_t TIME_STRETCH_LOW_WATER_FRAMES = CHUNK_FRAMES * 4;
-        constexpr size_t TIME_STRETCH_TARGET_BUFFER_FRAMES = CHUNK_FRAMES * 8;
-        constexpr size_t TIME_STRETCH_BATCH_FRAMES = CHUNK_FRAMES * 6;
+        // Above normal priority; ignored where not permitted.
+        setpriority(PRIO_PROCESS, static_cast<id_t>(gettid()), -16);
+        while (!stopRequested()) {
+            applyEq();
+            const int64_t seek = m_seekRequest.load(std::memory_order_acquire);
+            if (seek >= 0) {
+                seekLocked(seek);
+                continue;
+            }
+            const double speed = m_speed.load(std::memory_order_acquire);
+            const bool normal = isNormalSpeed(speed);
+            const bool modeChanged = m_speedModeDirty.exchange(false, std::memory_order_acq_rel);
+            if (modeChanged) {
+                m_stretch.setMode(m_speedMode.load(std::memory_order_acquire) == 1
+                    ? dsp::TimeStretchMode::Speech : dsp::TimeStretchMode::Music);
+            }
+            if (normal != m_normalPath || (modeChanged && !normal)) {
+                // Switching between the bit-exact path and the time-stretcher
+                // (or between stretch profiles) restarts from the audible frame.
+                m_normalPath = normal;
+                m_appliedSpeed = speed;
+                seekLocked(static_cast<int64_t>(audibleSourceFrame()));
+                continue;
+            }
+            if (!normal && speed != m_appliedSpeed) {
+                const uint64_t at = m_output->writtenFrames();
+                appendSegment(at, writeHeadSourceFrame(), speed, decoderInfo());
+                m_stretch.setSpeed(speed);
+                m_appliedSpeed = speed;
+            }
 
-        size_t   channels;
-        uint32_t decoderSR;
+            if (m_output->bufferedFrames() >= m_targetFrames || m_output->writableFrames() < kChunkFrames) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(4));
+                continue;
+            }
+
+            const size_t produced = normal ? decodeNormal() : decodeStretched(speed);
+            if (produced > 0) continue;
+            if (m_seekRequest.load(std::memory_order_acquire) >= 0) continue;
+            if (!m_normalPath && !m_stretch.isDrained()) continue;
+            if (finishOrAdvance()) continue;
+            if (!stopRequested() && m_seekRequest.load(std::memory_order_acquire) >= 0) continue;
+            break;
+        }
+        m_threadRunning.store(false, std::memory_order_release);
+    }
+
+    size_t decodeNormal() {
+        size_t frames = m_decoder->readFrames(m_source, kChunkFrames);
+        if (frames == 0) {
+            if (!switchToNextGapless(m_output->writtenFrames())) return 0;
+            frames = m_decoder->readFrames(m_source, kChunkFrames);
+            if (frames == 0) return 0;
+        }
+        interleave(m_source, frames, m_work.data());
+        applyTrackDsp(m_work.data(), frames);
+        emit(m_work.data(), frames);
+        return frames;
+    }
+
+    size_t decodeStretched(double speed) {
+        const size_t want = std::min(kChunkFrames * 2, m_output->writableFrames());
+        while (!m_inputExhausted && m_stretch.getAvailableFrames() < want && !stopRequested()) {
+            const size_t frames = m_decoder->readFrames(m_source, kChunkFrames);
+            if (frames == 0) {
+                if (m_seekRequest.load(std::memory_order_acquire) >= 0) return 0;
+                // Keep feeding the stretcher across a gapless boundary.
+                const uint64_t boundary = m_output->writtenFrames() + m_stretch.getAvailableFrames();
+                if (switchToNextGapless(boundary)) continue;
+                m_inputExhausted = true;
+                m_stretch.markEndOfInput();
+                break;
+            }
+            interleave(m_source, frames, m_work.data());
+            // EQ and ReplayGain belong to the source track, so they run before
+            // the stretcher; a gapless switch then changes gain at the right sample.
+            applyTrackDsp(m_work.data(), frames);
+            m_stretch.appendInterleaved(m_work.data(), frames);
+        }
+        (void)speed;
+        const size_t rendered = m_stretch.renderInterleaved(m_work.data(), want);
+        if (rendered > 0) emit(m_work.data(), rendered);
+        return rendered;
+    }
+
+    void interleave(const AudioBuffer& src, size_t frames, double* dst) const {
+        const size_t ch = m_decoderChannels;
+        for (size_t c = 0; c < ch; ++c) {
+            const double* in = src.getReadPointer(c);
+            for (size_t f = 0; f < frames; ++f) dst[f * ch + c] = in[f];
+        }
+    }
+
+    void applyTrackDsp(double* data, size_t frames) {
+        const size_t ch = m_decoderChannels;
+        m_eq.processRawInterleaved(data, frames, ch);
+        const double gain = m_gainLinear * m_eqPreamp;
+        if (gain != 1.0) {
+            for (size_t i = 0; i < frames * ch; ++i) data[i] *= gain;
+        }
+    }
+
+    // Edge ramp, downmix, then into the ring.
+    void emit(double* data, size_t frames) {
+        const size_t ch = m_decoderChannels;
+        if (m_startRampRemaining > 0) {
+            const size_t ramp = std::min(frames, m_startRampRemaining);
+            const size_t offset = m_edgeRampFrames - m_startRampRemaining;
+            for (size_t f = 0; f < ramp; ++f) {
+                const double g = static_cast<double>(offset + f + 1) / static_cast<double>(m_edgeRampFrames);
+                for (size_t c = 0; c < ch; ++c) data[f * ch + c] *= g;
+            }
+            m_startRampRemaining -= ramp;
+        }
+        if (m_outChannels == 2 && ch > 2) m_downmix.process(data, frames);
+        size_t done = 0;
+        while (done < frames && !stopRequested() && m_seekRequest.load(std::memory_order_acquire) < 0) {
+            const size_t n = m_output->write(data + done * m_outChannels, frames - done);
+            done += n;
+            if (n == 0) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    }
+
+    /** Same-format next track: swap decoders without touching the output. */
+    bool switchToNextGapless(uint64_t boundaryOut) {
+        std::unique_ptr<decoders::IAudioDecoder> next;
+        double gain = 1.0;
         {
-            std::lock_guard<std::mutex> lk(m_decoderMutex);
-            channels  = m_decoder->getNumChannels();
-            decoderSR = m_decoder->getSampleRate();
+            std::lock_guard<std::mutex> lock(m_nextMutex);
+            if (!m_next || m_next->getSampleRate() != m_decoder->getSampleRate() ||
+                m_next->getNumChannels() != m_decoderChannels) {
+                return false;
+            }
+            next = std::move(m_next);
+            gain = m_nextGain;
         }
+        const TrackInfo info = makeInfo(*next, gain);
+        m_decoder = std::move(next);
+        m_gainLinear = gain;
+        appendSegment(boundaryOut, 0.0, m_normalPath ? 1.0 : m_appliedSpeed, info);
+        return true;
+    }
 
-        AudioBuffer srcBuffer(channels, CHUNK_FRAMES * 8, decoderSR);
-        AudioBuffer outBuffer(channels, CHUNK_FRAMES,     decoderSR);
-        std::vector<double> interleaved(std::max(TIME_STRETCH_BATCH_FRAMES, CHUNK_FRAMES * 8) * channels);
-
-        while (!m_stopThread.load(std::memory_order_acquire)) {
-            applyPendingEqConfiguration();
-
-            if (m_speedModeChangePending.exchange(false, std::memory_order_acq_rel)) {
-                m_timeStretchProcessor->setMode(
-                    m_speedMode.load(std::memory_order_relaxed) == 1
-                        ? dsp::TimeStretchMode::Speech
-                        : dsp::TimeStretchMode::Music
-                );
-                m_speedPathChangePending.store(true, std::memory_order_release);
-            }
-
-            if (m_speedPathChangePending.exchange(false, std::memory_order_acq_rel)) {
-                m_timeStretchProcessor->reset();
-                m_timeStretchProcessor->setSpeed(m_speed.load(std::memory_order_relaxed));
-                m_timeStretchProcessor->clearEndOfInput();
-                m_ringBuffer->clear();
-                m_startRampFramesRemaining = EDGE_RAMP_FRAMES;
-            }
-
-            // Handle seek requests
-            int64_t seekFrame = m_seekRequest.load(std::memory_order_acquire);
-            if (seekFrame >= 0) {
-                std::lock_guard<std::mutex> lk(m_decoderMutex);
-                m_decoder->seekToFrame(static_cast<uint64_t>(seekFrame));
-                m_ringBuffer->clear();
-                m_timeStretchProcessor->reset();
-                m_timeStretchProcessor->setSpeed(m_speed.load(std::memory_order_relaxed));
-                m_timeStretchProcessor->clearEndOfInput();
-                m_startRampFramesRemaining = EDGE_RAMP_FRAMES;
-                m_seekRequest.store(-1, std::memory_order_release);
-            }
-
-            const double speed       = m_speed.load(std::memory_order_relaxed);
-            const bool   normalSpeed = isNormalPlaybackSpeed(speed);
-
-            if (normalSpeed) {
-                if (m_ringBuffer->getAvailableWrite() < CHUNK_FRAMES * channels) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                    continue;
-                }
-                m_timeStretchProcessor->reset();
-                size_t framesRead;
-                {
-                    std::lock_guard<std::mutex> lk(m_decoderMutex);
-                    framesRead = m_decoder->readFrames(outBuffer, CHUNK_FRAMES);
-                }
-                const bool likelyEndOfTrack = framesRead > 0 && framesRead < CHUNK_FRAMES;
-                if (framesRead == 0) {
-                    if (m_seekRequest.load(std::memory_order_acquire) >= 0) continue;
-                    // ── Gapless transition ─────────────────────────────────────
-                    bool switched = false;
-                    {
-                        std::lock_guard<std::mutex> lk(m_nextDecoderMutex);
-                        if (m_nextDecoder) {
-                            const uint32_t nextSR = m_nextDecoder->getSampleRate();
-                            const size_t   nextCh = m_nextDecoder->getNumChannels();
-                            if (nextSR == decoderSR && nextCh == channels) {
-                                {
-                                    std::lock_guard<std::mutex> lk2(m_decoderMutex);
-                                    m_decoder = std::move(m_nextDecoder);
-                                }
-                                m_gainProcessor->prepare(nextSR, 1024);
-                                m_eqProcessor->prepare(nextSR, 1024);
-                                applyPendingEqConfiguration();
-                                m_gainProcessor->setReplayGainDb(m_nextReplayGainDb);
-                                m_gainProcessor->setGainLinear(m_userVolume.load());
-                                resetPositionState(0.0);
-                                m_gaplessBlendPending = (m_tailValidFrames > 0);
-                                m_startRampFramesRemaining = 0;
-                                m_gaplessAdvanced.store(true, std::memory_order_release);
-                                switched = true;
-                            } else {
-                                m_nextDecoder.reset(); // format mismatch
-                            }
-                        }
-                    }
-                    if (switched) continue;
-                    // ────────────────────────────────────────────────────────────
-                    stopPositionClock();
-                    m_isPlaying.store(false, std::memory_order_release);
-                    break;
-                }
-                clearBufferTail(outBuffer, framesRead);
-                m_eqProcessor->processBlock(outBuffer);
-                m_gainProcessor->processBlock(outBuffer);
-                for (size_t f = 0; f < framesRead; ++f)
-                    for (size_t ch = 0; ch < channels; ++ch)
-                        interleaved[f * channels + ch] = outBuffer.getReadPointer(ch)[f];
-                applyGaplessBlend(interleaved.data(), framesRead, channels);
-                applyStartRamp(interleaved.data(), framesRead, channels);
-                if (likelyEndOfTrack && !m_nextDecoder) {
-                    applyTailRamp(interleaved.data(), framesRead, channels);
-                }
-                m_ringBuffer->write(interleaved.data(), framesRead * channels);
-                updateSpectrum(interleaved.data(), framesRead, channels);
-                updateTailHistory(interleaved.data(), framesRead, channels);
-
-            } else {
-                m_timeStretchProcessor->setSpeed(speed);
-                const size_t bufferedFrames = m_ringBuffer->getAvailableRead() / channels;
-                if (bufferedFrames >= TIME_STRETCH_TARGET_BUFFER_FRAMES) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                    continue;
-                }
-
-                const size_t requestedFrames = std::clamp(
-                    TIME_STRETCH_TARGET_BUFFER_FRAMES - bufferedFrames,
-                    CHUNK_FRAMES,
-                    TIME_STRETCH_BATCH_FRAMES
-                );
-                bool decoderExhausted = false;
-
-                auto feedTimeStretchInput = [&](size_t minFramesToRead) {
-                    size_t srcFramesToRead = static_cast<size_t>(std::ceil(minFramesToRead * speed))
-                        + CHUNK_FRAMES;
-                    srcFramesToRead = std::clamp<size_t>(srcFramesToRead, CHUNK_FRAMES * 2, CHUNK_FRAMES * 8);
-
-                    size_t framesRead;
-                    {
-                        std::lock_guard<std::mutex> lk(m_decoderMutex);
-                        framesRead = m_decoder->readFrames(srcBuffer, srcFramesToRead);
-                    }
-                    if (framesRead == 0) {
-                        decoderExhausted = true;
-                        m_timeStretchProcessor->markEndOfInput();
-                        return;
-                    }
-
-                    for (size_t frame = 0; frame < framesRead; ++frame) {
-                        for (size_t ch = 0; ch < channels; ++ch) {
-                            interleaved[frame * channels + ch] = srcBuffer.getReadPointer(ch)[frame];
-                        }
-                    }
-                    m_timeStretchProcessor->appendInterleaved(interleaved.data(), framesRead);
-                };
-
-                while (m_timeStretchProcessor->getAvailableFrames() < TIME_STRETCH_LOW_WATER_FRAMES && !decoderExhausted) {
-                    const size_t bufferedStretchFrames = m_timeStretchProcessor->getAvailableFrames();
-                    const size_t lowWaterDeficit = TIME_STRETCH_LOW_WATER_FRAMES > bufferedStretchFrames
-                        ? TIME_STRETCH_LOW_WATER_FRAMES - bufferedStretchFrames
-                        : 0;
-                    const size_t requestDeficit = requestedFrames > bufferedStretchFrames
-                        ? requestedFrames - bufferedStretchFrames
-                        : 0;
-                    const size_t framesNeeded = std::max(
-                        lowWaterDeficit,
-                        requestDeficit
-                    );
-                    feedTimeStretchInput(framesNeeded);
-                }
-
-                size_t outFrames = m_timeStretchProcessor->renderInterleaved(interleaved.data(), requestedFrames);
-
-                while (outFrames < requestedFrames && !decoderExhausted) {
-                    feedTimeStretchInput(requestedFrames - outFrames);
-                    outFrames += m_timeStretchProcessor->renderInterleaved(
-                        interleaved.data() + outFrames * channels,
-                        requestedFrames - outFrames
-                    );
-                }
-
-                if (outFrames == 0 && decoderExhausted) {
-                    if (m_seekRequest.load(std::memory_order_acquire) >= 0) continue;
-                    bool switched = false;
-                    {
-                        std::lock_guard<std::mutex> lk(m_nextDecoderMutex);
-                        if (m_nextDecoder) {
-                            const uint32_t nextSR = m_nextDecoder->getSampleRate();
-                            const size_t   nextCh = m_nextDecoder->getNumChannels();
-                            if (nextSR == decoderSR && nextCh == channels) {
-                                {
-                                    std::lock_guard<std::mutex> lk2(m_decoderMutex);
-                                    m_decoder = std::move(m_nextDecoder);
-                                }
-                                m_gainProcessor->prepare(nextSR, 1024);
-                                m_eqProcessor->prepare(nextSR, 1024);
-                                applyPendingEqConfiguration();
-                                m_timeStretchProcessor->prepare(nextSR, nextCh);
-                                m_timeStretchProcessor->setSpeed(m_speed.load(std::memory_order_relaxed));
-                                m_gainProcessor->setReplayGainDb(m_nextReplayGainDb);
-                                m_gainProcessor->setGainLinear(m_userVolume.load());
-                                resetPositionState(0.0);
-                                m_gaplessBlendPending = (m_tailValidFrames > 0);
-                                m_startRampFramesRemaining = 0;
-                                m_gaplessAdvanced.store(true, std::memory_order_release);
-                                switched = true;
-                            } else {
-                                m_nextDecoder.reset();
-                            }
-                        }
-                    }
-                    if (switched) continue;
-                    stopPositionClock();
-                    m_isPlaying.store(false, std::memory_order_release);
-                    break;
-                }
-
-                const bool likelyEndOfTrack = decoderExhausted
-                    && m_timeStretchProcessor->isDrained()
-                    && outFrames < requestedFrames;
-                m_eqProcessor->processRawInterleaved(interleaved.data(), outFrames, channels);
-                m_gainProcessor->processRawInterleaved(interleaved.data(), outFrames, channels);
-                applyGaplessBlend(interleaved.data(), outFrames, channels);
-                applyStartRamp(interleaved.data(), outFrames, channels);
-                if (likelyEndOfTrack && !m_nextDecoder) {
-                    applyTailRamp(interleaved.data(), outFrames, channels);
-                }
-                m_ringBuffer->write(interleaved.data(), outFrames * channels);
-                updateSpectrum(interleaved.data(), outFrames, channels);
-                updateTailHistory(interleaved.data(), outFrames, channels);
-            }
+    /**
+     * End of the current decoder. A next track with a different format is
+     * played after the queue drains and the stream is reopened; otherwise the
+     * player ends. Returns true when playback continues.
+     */
+    bool finishOrAdvance() {
+        std::unique_ptr<decoders::IAudioDecoder> next;
+        double gain = 1.0;
+        {
+            std::lock_guard<std::mutex> lock(m_nextMutex);
+            next = std::move(m_next);
+            gain = m_nextGain;
         }
+        if (!drainOutput()) {
+            if (next) {
+                std::lock_guard<std::mutex> lock(m_nextMutex);
+                if (!m_next) { m_next = std::move(next); m_nextGain = gain; }
+            }
+            return false;
+        }
+        if (!next) {
+            m_output->stop(5);
+            if (!stopRequested()) m_state.store(PlayerState::Ended, std::memory_order_release);
+            return false;
+        }
+        const TrackInfo info = makeInfo(*next, gain);
+        if (!m_output->configure(info.sampleRate, static_cast<int>(info.channels)) || !m_output->start()) {
+            m_state.store(PlayerState::Error, std::memory_order_release);
+            return false;
+        }
+        m_decoder = std::move(next);
+        m_gainLinear = gain;
+        prepareDsp(info.sampleRate, info.channels);
+        m_startRampRemaining = 0;
+        {
+            std::lock_guard<std::mutex> lock(m_infoMutex);
+            m_segments.clear();
+            m_segments.push_back(Segment{m_output->consumedFrames(), 0.0, currentRate(), info});
+        }
+        return true;
+    }
+
+    /** Waits until the device consumed everything written. False if stopped. */
+    bool drainOutput() {
+        while (!stopRequested()) {
+            if (m_seekRequest.load(std::memory_order_acquire) >= 0) return false;
+            if (m_output->consumedFrames() >= m_output->writtenFrames()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(3));
+        }
+        return false;
     }
 
     // ── Members ──────────────────────────────────────────────────────────────
 
-    std::atomic<bool>    m_isPlaying;
-    std::atomic<bool>    m_stopThread;
-    std::atomic<int64_t> m_seekRequest;
-    std::atomic<double>  m_speed;
-    std::atomic<int>     m_speedMode{0};
-    std::atomic<bool>    m_speedPathChangePending{false};
-    std::atomic<bool>    m_speedModeChangePending{false};
-    std::atomic<double>  m_userVolume;
-    std::atomic<bool>    m_gaplessAdvanced;
-    std::thread          m_decodeThread;
-    mutable std::mutex   m_positionMutex;
-    double               m_positionBaseMs{0.0};
-    std::chrono::steady_clock::time_point m_positionClockStart{};
-    bool                 m_positionClockRunning{false};
-    size_t               m_startRampFramesRemaining{0};
-    bool                 m_gaplessBlendPending{false};
-    size_t               m_tailValidFrames{0};
-    std::vector<double>  m_tailInterleaved;
+    std::unique_ptr<hw::OboeOutput> m_output;
 
-    mutable std::mutex                       m_decoderMutex;
+    std::mutex m_control;
+    std::thread m_thread;
+    std::atomic<bool> m_stopThread{false};
+    std::atomic<bool> m_threadRunning{false};
+    std::atomic<PlayerState> m_state{PlayerState::Idle};
+    std::atomic<int64_t> m_seekRequest{-1};
+    std::atomic<double> m_speed{1.0};
+    std::atomic<int> m_speedMode{0};
+    std::atomic<bool> m_speedModeDirty{false};
+    std::atomic<uint64_t> m_serial{0};
+
+    // Decode-thread state.
     std::unique_ptr<decoders::IAudioDecoder> m_decoder;
+    uint32_t m_decoderChannels = 0;
+    uint32_t m_outChannels = 0;
+    double m_gainLinear = 1.0;
+    double m_eqPreamp = 1.0;
+    double m_appliedSpeed = 1.0;
+    bool m_normalPath = true;
+    bool m_inputExhausted = false;
+    size_t m_targetFrames = 0;
+    size_t m_edgeRampFrames = 1;
+    size_t m_startRampRemaining = 0;
+    AudioBuffer m_source{1, 1, 48000};
+    std::vector<double> m_work;
+    dsp::GraphicEqProcessor m_eq;
+    dsp::TimeStretchProcessor m_stretch;
+    dsp::StereoDownmix m_downmix;
 
-    mutable std::mutex                       m_nextDecoderMutex;
-    std::unique_ptr<decoders::IAudioDecoder> m_nextDecoder;
-    float                                    m_nextReplayGainDb{0.0f};
+    mutable std::mutex m_nextMutex;
+    std::unique_ptr<decoders::IAudioDecoder> m_next;
+    double m_nextGain = 1.0;
 
-    mutable std::mutex                       m_eqConfigMutex;
-    std::array<double, dsp::GraphicEqProcessor::BandCount> m_eqBandGainsDb{0.0, 0.0, 0.0, 0.0, 0.0};
-    bool                                     m_eqEnabled{false};
-    std::atomic<bool>                        m_eqConfigDirty{true};
+    std::mutex m_eqMutex;
+    std::array<double, dsp::GraphicEqProcessor::BandCount> m_eqGains{};
+    bool m_eqEnabled = false;
+    std::atomic<bool> m_eqDirty{true};
 
-    std::unique_ptr<RingBuffer<double>>      m_ringBuffer;
-    std::unique_ptr<dsp::GainProcessor>      m_gainProcessor;
-    std::unique_ptr<dsp::GraphicEqProcessor> m_eqProcessor;
-    std::unique_ptr<dsp::TimeStretchProcessor> m_timeStretchProcessor;
-    std::unique_ptr<hw::OboeAudioEndpoint>   m_endpoint;
+    mutable std::mutex m_infoMutex;
+    mutable TrackInfo m_current;
+    mutable std::deque<Segment> m_segments;
+    mutable std::atomic<bool> m_trackAdvanced{false};
 
-    // Spectrum
-    std::array<float, SPECTRUM_N>    m_specBuf;
-    std::atomic<size_t>              m_specWritePos;
-    mutable float                    m_specSmooth[SPECTRUM_BANDS];
-    mutable std::mutex               m_specMutex;
+    std::mutex m_spectrumMutex;
+    dsp::SpectrumAnalyzer m_analyzer;
+    std::array<float, dsp::SpectrumAnalyzer::kSize> m_spectrumSamples{};
 };
 
 } // namespace core

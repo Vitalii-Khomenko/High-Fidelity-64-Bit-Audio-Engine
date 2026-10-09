@@ -4,11 +4,15 @@ import android.content.Context
 import android.net.Uri
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.aiproject.musicplayer.library.DlnaDiscovery
+import com.aiproject.musicplayer.library.DlnaPlaybackCache
+import com.aiproject.musicplayer.library.DlnaServer
 import java.io.File
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
+import org.junit.Before
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -19,6 +23,9 @@ class DlnaSmokeInstrumentedTest {
 
     private val context: Context = ApplicationProvider.getApplicationContext()
     private val server = MockWebServer()
+
+    @Before
+    fun startServer() { server.start() }
 
     @After
     fun tearDown() {
@@ -32,9 +39,9 @@ class DlnaSmokeInstrumentedTest {
                 .setResponseCode(200)
                 .setBody(
                     """
-                    <s:Envelope>
+                    <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
                       <s:Body>
-                        <Result>&lt;DIDL-Lite&gt;
+                        <Result>&lt;DIDL-Lite xmlns:dc=&quot;http://purl.org/dc/elements/1.1/&quot;&gt;
                           &lt;item&gt;
                             &lt;dc:title&gt;Mock Track&lt;/dc:title&gt;
                             &lt;res duration=&quot;0:00:42.250&quot;&gt;${server.url("/audio/mock.flac")}&lt;/res&gt;
@@ -45,7 +52,6 @@ class DlnaSmokeInstrumentedTest {
                     """.trimIndent()
                 )
         )
-        server.start()
 
         val tracks = DlnaDiscovery.browse(
             DlnaServer(
@@ -53,7 +59,7 @@ class DlnaSmokeInstrumentedTest {
                 location = server.url("/device.xml").toString(),
                 controlUrl = server.url("/ctl").toString(),
             )
-        )
+        ).tracks
 
         assertEquals(1, tracks.size)
         assertEquals("Mock Track", tracks.first().title)
@@ -67,7 +73,6 @@ class DlnaSmokeInstrumentedTest {
                 .setResponseCode(200)
                 .setBody("audio-bytes")
         )
-        server.start()
 
         val cacheDir = File(context.cacheDir, "dlna-smoke-${System.nanoTime()}")
         val resolved = DlnaPlaybackCache.resolvePlaybackUri(

@@ -7978,7 +7978,7 @@ DRWAV_API void drwav_u8_to_s32(drwav_int32* pOut, const drwav_uint8* pIn, size_t
     }
 
     for (i = 0; i < sampleCount; ++i) {
-        *pOut++ = ((int)pIn[i] - 128) << 24;
+        *pOut++ = ((int)pIn[i] - 128) * 16777216; /* Avoid shifting a negative signed value. */
     }
 }
 
@@ -7991,7 +7991,7 @@ DRWAV_API void drwav_s16_to_s32(drwav_int32* pOut, const drwav_int16* pIn, size_
     }
 
     for (i = 0; i < sampleCount; ++i) {
-        *pOut++ = pIn[i] << 16;
+        *pOut++ = (drwav_int32)pIn[i] * 65536; /* Exact, defined signed multiplication. */
     }
 }
 

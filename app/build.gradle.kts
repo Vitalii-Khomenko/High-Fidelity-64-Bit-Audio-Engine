@@ -1,4 +1,4 @@
-﻿import java.util.Properties
+import java.util.Properties
 
 plugins {
     id("com.android.application")
@@ -13,20 +13,20 @@ kapt {
 // Load signing properties from local.properties
 val localProps = Properties().also { props ->
     val f = rootProject.file("local.properties")
-    if (f.exists()) props.load(f.inputStream())
+    if (f.exists()) f.inputStream().use { props.load(it) }
 }
 
 android {
     namespace = "com.aiproject.musicplayer"
     compileSdk = 35
-    ndkVersion = "26.1.10909125"
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         applicationId = "com.aiproject.musicplayer"
         minSdk = 24
         targetSdk = 35
-        versionCode = 807
-        versionName = "0.8.7"
+        versionCode = 900
+        versionName = "0.9.0"
 
         externalNativeBuild {
             cmake {
@@ -35,10 +35,21 @@ android {
             }
         }
 
+        ndk {
+            // Phones and tablets; x86_64 for the emulator.
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        }
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
+        create("audit") {
+            storeFile = file(localProps.getProperty("AUDIT_KEYSTORE_FILE", "../signing/hifi-audit.jks"))
+            storePassword = localProps.getProperty("AUDIT_KEYSTORE_PASSWORD", "")
+            keyAlias = localProps.getProperty("AUDIT_KEY_ALIAS", "hifi-audit")
+            keyPassword = localProps.getProperty("AUDIT_KEY_PASSWORD", "")
+        }
         create("release") {
             storeFile     = file(localProps.getProperty("KEYSTORE_FILE", "../hifi-player.jks"))
             storePassword = localProps.getProperty("KEYSTORE_PASSWORD", "")
@@ -54,6 +65,14 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.getByName("release")
         }
+        create("audit") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".audit"
+            versionNameSuffix = "-audit"
+            resValue("string", "app_name", "HiFi Player Audit")
+            signingConfig = signingConfigs.getByName("audit")
+            matchingFallbacks += "release"
+        }
     }
 
     externalNativeBuild {
@@ -63,9 +82,15 @@ android {
         }
     }
 
+    packaging {
+        // liblog is supplied by Android. Never bundle the NDK link-time stub.
+        jniLibs.excludes += "**/liblog.so"
+    }
+
     buildFeatures {
         compose = true
         prefab = true
+        buildConfig = true
     }
 
     composeOptions {
@@ -92,8 +117,8 @@ dependencies {
     kapt("androidx.room:room-compiler:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")
 
-    implementation(platform("androidx.compose:compose-bom:2026.03.00"))
-    androidTestImplementation(platform("androidx.compose:compose-bom:2026.03.00"))
+    implementation(platform("androidx.compose:compose-bom:2024.09.03"))
+    androidTestImplementation(platform("androidx.compose:compose-bom:2024.09.03"))
 
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
@@ -118,5 +143,5 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 
-    implementation("com.google.oboe:oboe:1.8.1")
+    implementation("com.google.oboe:oboe:1.9.3")
 }

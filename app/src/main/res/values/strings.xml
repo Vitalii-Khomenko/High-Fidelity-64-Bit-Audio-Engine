@@ -1,4 +1,130 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">HiFi Player</string>
+    <string name="app_name" translatable="false">HiFi Player</string>
+    <string name="header_tag">64-bit engine</string>
+    <string name="starting_engine">Starting engine</string>
+    <string name="toggle_theme">Switch theme</string>
+    <string name="notification_channel">Playback</string>
+
+    <string name="tab_player">Player</string>
+    <string name="tab_library">Library</string>
+    <string name="tab_sound">Sound</string>
+    <string name="tab_settings">Settings</string>
+
+    <string name="action_play">Play</string>
+    <string name="action_pause">Pause</string>
+    <string name="action_next">Next</string>
+    <string name="action_previous">Previous</string>
+    <string name="shuffle">Shuffle</string>
+    <string name="repeat_off">Repeat off</string>
+    <string name="repeat_all">Repeat all</string>
+    <string name="repeat_one">Repeat one</string>
+
+    <string name="now_playing">Now playing</string>
+    <string name="ready">Ready</string>
+    <string name="loading">Loading</string>
+    <string name="nothing_playing">Nothing playing</string>
+    <string name="mode_music">Music</string>
+    <string name="mode_books">Books</string>
+    <string name="eq_on">EQ on</string>
+    <string name="eq_off">EQ off</string>
+
+    <string name="queue">Queue</string>
+    <plurals name="track_count">
+        <item quantity="one">%d track</item>
+        <item quantity="other">%d tracks</item>
+    </plurals>
+    <string name="queue_empty_title">Nothing queued yet</string>
+    <string name="queue_empty_text">Add a music folder, scan the device or browse a DLNA server on your network.</string>
+    <string name="open_library">Open library</string>
+    <string name="add">Add</string>
+    <string name="sort_name">A–Z</string>
+    <string name="sort_number">1–9</string>
+    <string name="save">Save</string>
+    <string name="clear">Clear</string>
+    <string name="remove">Remove</string>
+    <string name="finished">Finished</string>
+    <string name="cancel">Cancel</string>
+    <string name="save_playlist">Save playlist</string>
+    <string name="playlist_name">Playlist name</string>
+    <string name="playlist_saved">Saved \"%1$s\"</string>
+    <string name="clear_queue_title">Clear the queue?</string>
+    <string name="clear_queue_text">Playback stops and the queue is emptied. Saved playlists and folders stay.</string>
+
+    <string name="folders">Folders</string>
+    <string name="folders_hint">Folders you grant access to. Subfolders are included.</string>
+    <string name="add_folder">Add folder</string>
+    <string name="access_lost">Access lost — tap to grant it again</string>
+    <string name="add_to_queue">Add to queue</string>
+    <string name="scanning">Scanning %1$s…</string>
+    <string name="no_tracks_in">No playable files in %1$s</string>
+    <string name="added_tracks">Added %1$d tracks from %2$s</string>
+    <string name="added_one">Added %1$s</string>
+    <string name="already_queued">Already in the queue</string>
+    <string name="device">Device</string>
+    <string name="device_hint">All FLAC, WAV, AIFF, MP3, DSF and DFF files the system has indexed.</string>
+    <string name="scan_device">Scan device</string>
+    <string name="permission_denied_media">Permission denied. Add folders instead.</string>
+    <string name="network">Network</string>
+    <string name="network_hint">DLNA / UPnP media servers on this Wi-Fi. Tracks are downloaded before they play.</string>
+    <string name="find_servers">Find servers</string>
+    <string name="rescan">Search again</string>
+    <string name="no_servers">No media servers answered.</string>
+    <string name="playlists">Playlists</string>
+    <string name="no_playlists">No saved playlists.</string>
+    <string name="save_current_queue">Save current queue</string>
+    <string name="loaded_playlist">Loaded \"%1$s\" (%2$d)</string>
+    <string name="rename">Rename</string>
+    <string name="rename_playlist">Rename playlist</string>
+    <string name="delete">Delete</string>
+    <string name="delete_playlist">Delete playlist?</string>
+    <string name="back">Back</string>
+    <string name="cannot_open_folder">Cannot open this folder</string>
+    <string name="play_folder">Play folder</string>
+    <string name="add_folder_to_queue">Add folder</string>
+    <string name="play_all">Play all</string>
+    <string name="add_all">Add all</string>
+
+    <string name="volume">Volume</string>
+    <string name="volume_hint" formatted="false">Applied in the engine after the buffer, so changes are heard at once. Use the system volume for loudness; keep this at 100% for unaltered output.</string>
+    <string name="speed">Speed</string>
+    <string name="stretch_profile">Time-stretch profile</string>
+    <string name="profile_music">Music</string>
+    <string name="profile_speech">Speech</string>
+    <string name="speed_hint">At 1.00× samples pass through untouched. Other speeds keep the pitch with Sonic time-stretching.</string>
+    <string name="equalizer">Equalizer</string>
+    <string name="on">On</string>
+    <string name="off">Off</string>
+    <string name="eq_hint">Five 64-bit biquad bands. Boosts lower the overall level automatically to avoid clipping.</string>
+    <string name="reset">Reset</string>
+    <string name="replaygain">ReplayGain</string>
+    <string name="rg_track">Track</string>
+    <string name="rg_album">Album</string>
+    <string name="replaygain_hint">Reads REPLAYGAIN tags from FLAC, MP3, WAV, AIFF and DSF and never boosts past the tagged peak. Applies from the next track.</string>
+
+    <string name="theme">Theme</string>
+    <string name="theme_system">System</string>
+    <string name="theme_dark">Dark</string>
+    <string name="theme_light">Light</string>
+    <string name="listening_mode">Listening mode</string>
+    <string name="listening_mode_hint">Books remembers the position of every file and marks finished chapters. Music always starts tracks from the beginning.</string>
+    <string name="clear_finished">Clear finished marks</string>
+    <string name="sleep_timer">Sleep timer</string>
+    <string name="minutes">%1$d min</string>
+    <string name="sleep_hint">Fades out over the last 30 seconds, then pauses.</string>
+    <string name="signal_path">Signal path</string>
+    <string name="path_source">Source</string>
+    <string name="path_engine">Engine</string>
+    <string name="path_engine_value">64-bit float decode, EQ and gain</string>
+    <string name="path_output">Output</string>
+    <string name="path_device">Device</string>
+    <string name="device_speaker">Built-in</string>
+    <string name="underruns">Underruns</string>
+    <string name="signal_path_hint">Android mixes all apps in shared mode, so the device may resample. DSD is converted to PCM in the engine.</string>
+    <string name="about">About</string>
+    <string name="version">Version</string>
+    <string name="about_text">Native C++ playback engine with 64-bit DSP, gapless playback, DSD-to-PCM conversion and an Oboe output stage. Free and open source.</string>
+
+    <string name="error_cannot_play">Cannot play %1$s</string>
+    <string name="error_audio_focus">Another app is holding audio focus</string>
 </resources>

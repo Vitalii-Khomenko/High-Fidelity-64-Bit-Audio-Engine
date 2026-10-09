@@ -1,93 +1,80 @@
 #pragma once
-#include "IAudioDecoder.h"
-#include <unistd.h>
 
-// Define implementations exactly once here
+#include "FileSource.h"
+#include "IAudioDecoder.h"
+
+#include <algorithm>
+#include <vector>
+
 #define DR_FLAC_IMPLEMENTATION
 #include "dr_flac.h"
 
-class FlacDecoder : public audio_engine::decoders::IAudioDecoder {
+namespace audio_engine {
+namespace decoders {
+
+class FlacDecoder : public IAudioDecoder {
 public:
-    FlacDecoder() : pFlac(nullptr), m_fd(-1) {}
-
-    ~FlacDecoder() override {
-        if (pFlac) {
-            drflac_close(pFlac);
-        }
-        if (m_fd != -1) {
-            close(m_fd);
-        }
-    }
-
-    bool open(const std::string& filepath) override {
-        // Fallback for paths
-        pFlac = drflac_open_file(filepath.c_str(), nullptr);
-        return pFlac != nullptr;
-    }
+    ~FlacDecoder() override { closeDecoder(); }
 
     bool openFd(int fd) override {
-        m_fd = dup(fd); // duplicate FD to own its lifecycle
-        pFlac = drflac_open(onRead, onSeek, onTell, &m_fd, nullptr);
-        if (!pFlac) {
-            close(m_fd);
-            m_fd = -1;
+        closeDecoder();
+        if (!m_source.open(fd)) return false;
+        m_flac = drflac_open(&FileSource::onRead, onSeek, onTell, &m_source, nullptr);
+        if (!m_flac || m_flac->channels == 0 || m_flac->sampleRate == 0) {
+            closeDecoder();
             return false;
         }
         return true;
     }
 
-    size_t readFrames(audio_engine::core::AudioBuffer& buffer, size_t framesToRead) override {
-        if (!pFlac) return 0;
-        
-        uint32_t channels = getNumChannels();
-        std::vector<int32_t> tempBuffer(framesToRead * channels);
-        drflac_uint64 framesDecoded = drflac_read_pcm_frames_s32(pFlac, framesToRead, tempBuffer.data());
-
-        if (framesDecoded == 0) return 0;
-
-        double scale = 1.0 / 2147483648.0; 
-        for (uint32_t ch = 0; ch < channels; ++ch) {
-            double* dest = buffer.getWritePointer(ch);
-            for (size_t i = 0; i < framesDecoded; ++i) {
-                dest[i] = tempBuffer[i * channels + ch] * scale;
-            }
+    size_t readFrames(core::AudioBuffer& buffer, size_t framesToRead) override {
+        if (!m_flac) return 0;
+        const size_t channels = m_flac->channels;
+        if (buffer.getNumChannels() < channels) return 0;
+        framesToRead = std::min(framesToRead, buffer.getNumFrames());
+        if (m_scratch.size() < framesToRead * channels) m_scratch.resize(framesToRead * channels);
+        const size_t decoded = static_cast<size_t>(
+            drflac_read_pcm_frames_s32(m_flac, framesToRead, m_scratch.data()));
+        constexpr double scale = 1.0 / 2147483648.0;
+        for (size_t ch = 0; ch < channels; ++ch) {
+            double* dst = buffer.getWritePointer(ch);
+            for (size_t i = 0; i < decoded; ++i) dst[i] = m_scratch[i * channels + ch] * scale;
         }
-        return static_cast<size_t>(framesDecoded);
+        return decoded;
     }
 
-    bool seekToFrame(uint64_t targetFrame) override { return pFlac ? drflac_seek_to_pcm_frame(pFlac, targetFrame) == DRFLAC_TRUE : false; }
+    bool seekToFrame(uint64_t frame) override {
+        return m_flac && drflac_seek_to_pcm_frame(m_flac, frame) == DRFLAC_TRUE;
+    }
 
-    uint32_t getSampleRate() const override { return pFlac ? pFlac->sampleRate : 0; }
-    size_t getNumChannels() const override { return pFlac ? pFlac->channels : 0; }
-    uint32_t getBitsPerSample() const override { return pFlac ? pFlac->bitsPerSample : 0; }
-    uint64_t getTotalFrames() const override { return pFlac ? pFlac->totalPCMFrameCount : 0; }
-    uint64_t getCurrentFrame() const override { return pFlac ? pFlac->currentPCMFrame : 0; }
+    uint32_t getSampleRate() const override { return m_flac ? m_flac->sampleRate : 0; }
+    size_t getNumChannels() const override { return m_flac ? m_flac->channels : 0; }
+    uint32_t getBitsPerSample() const override { return m_flac ? m_flac->bitsPerSample : 0; }
+    uint64_t getTotalFrames() const override { return m_flac ? m_flac->totalPCMFrameCount : 0; }
+    uint64_t getCurrentFrame() const override { return m_flac ? m_flac->currentPCMFrame : 0; }
+    Codec getCodec() const override { return Codec::Flac; }
 
 private:
-    drflac* pFlac;
-    int m_fd;
+    FileSource m_source;
+    drflac* m_flac = nullptr;
+    std::vector<int32_t> m_scratch;
 
-    static size_t onRead(void* pUserData, void* pBufferOut, size_t bytesToRead) {
-        int fd = *static_cast<int*>(pUserData);
-        ssize_t bytesRead = read(fd, pBufferOut, bytesToRead);
-        return bytesRead > 0 ? static_cast<size_t>(bytesRead) : 0;
+    void closeDecoder() {
+        if (m_flac) drflac_close(m_flac);
+        m_flac = nullptr;
+        m_source.close();
     }
 
-    static drflac_bool32 onSeek(void* pUserData, int offset, drflac_seek_origin origin) {
-        int fd = *static_cast<int*>(pUserData);
-        int whence = SEEK_SET;
-        if (origin == DRFLAC_SEEK_CUR) whence = SEEK_CUR;
-        if (origin == DRFLAC_SEEK_END) whence = SEEK_END;
-        
-        off_t newPos = lseek(fd, offset, whence);
-        return newPos >= 0 ? DRFLAC_TRUE : DRFLAC_FALSE;
+    static drflac_bool32 onSeek(void* user, int offset, drflac_seek_origin origin) {
+        return FileSource::onSeekImpl(user, offset, static_cast<int>(origin)) ? DRFLAC_TRUE : DRFLAC_FALSE;
     }
-
-    static drflac_bool32 onTell(void* pUserData, drflac_int64* pCursor) {
-        int fd = *static_cast<int*>(pUserData);
-        off_t current = lseek(fd, 0, SEEK_CUR);
-        if (current < 0) return DRFLAC_FALSE;
-        *pCursor = static_cast<drflac_int64>(current);
+    static drflac_bool32 onTell(void* user, drflac_int64* cursor) {
+        int64_t value = 0;
+        FileSource::onTellImpl(user, &value);
+        *cursor = value;
         return DRFLAC_TRUE;
     }
 };
+
+} // namespace decoders
+} // namespace audio_engine

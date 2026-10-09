@@ -38,7 +38,7 @@ public:
     }
 
     void setSpeed(double speed) {
-        m_targetSpeed = std::clamp(speed, 0.75, 2.0);
+        m_targetSpeed = std::clamp(speed, 0.5, 2.0);
     }
 
     void clearEndOfInput() {
@@ -60,7 +60,8 @@ public:
             m_floatBuffer.resize(sampleCount);
         }
         for (size_t index = 0; index < sampleCount; ++index) {
-            m_floatBuffer[index] = static_cast<float>(std::clamp(input[index], -1.0, 1.0));
+            // Sonic runs in float here (see sonic.c), so no clipping is needed.
+            m_floatBuffer[index] = static_cast<float>(input[index]);
         }
         sonicWriteFloatToStream(m_stream.get(), m_floatBuffer.data(), static_cast<int>(frames));
     }
@@ -143,7 +144,7 @@ private:
         sonicSetPitch(m_stream.get(), 1.0f);
         sonicSetRate(m_stream.get(), 1.0f);
         sonicSetVolume(m_stream.get(), 1.0f);
-        sonicSetQuality(m_stream.get(), 1);
+        sonicSetQuality(m_stream.get(), m_mode == TimeStretchMode::Music ? 1 : 0);
     }
 
     void recreateStream() {

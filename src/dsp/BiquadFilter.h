@@ -3,6 +3,7 @@
 #include "IAudioProcessor.h"
 #include <cmath>
 #include <vector>
+#include <algorithm>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -115,7 +116,7 @@ public:
 
     void setParameters(FilterType type, double frequency, double qFactor, double gainDb) {
         m_type = type;
-        m_frequency = frequency;
+        m_frequency = std::clamp(frequency, 1.0, std::max(1.0, m_sampleRate * 0.49));
         m_qFactor = qFactor;
         m_gainDb = gainDb;
         if (m_sampleRate > 0) {

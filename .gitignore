@@ -9,3 +9,8 @@ local.properties
 .DS_Store
 build/
 app/build/
+
+.local-toolchain/
+signing/
+artifacts/
+.claude/settings.local.json

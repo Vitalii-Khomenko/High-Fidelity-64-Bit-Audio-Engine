@@ -1,101 +1,111 @@
-﻿#pragma once
+#pragma once
+
+#include "FileSource.h"
 #include "IAudioDecoder.h"
-#include <unistd.h>
+
+#include <algorithm>
+#include <vector>
 
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
 
-class WavDecoder : public audio_engine::decoders::IAudioDecoder {
+namespace audio_engine {
+namespace decoders {
+
+/** WAV, RF64, W64 and AIFF/AIFC (PCM, IEEE float, A-law, mu-law, ADPCM). */
+class WavDecoder : public IAudioDecoder {
 public:
-    WavDecoder() : m_fd(-1), m_currentFrame(0) {}
-
-    ~WavDecoder() override {
-        if (m_initialized) {
-            drwav_uninit(&wavFrame);
-        }
-        if (m_fd != -1) {
-            close(m_fd);
-        }
-    }
-
-    bool open(const std::string& filepath) override {
-        m_initialized = drwav_init_file(&wavFrame, filepath.c_str(), nullptr);
-        m_currentFrame = 0;
-        return m_initialized;
-    }
+    ~WavDecoder() override { closeDecoder(); }
 
     bool openFd(int fd) override {
-        m_fd = dup(fd);
-        m_initialized = drwav_init(&wavFrame, onRead, onSeek, onTell, &m_fd, nullptr);
-        m_currentFrame = 0;
-        if (!m_initialized) {
-            close(m_fd);
-            m_fd = -1;
+        closeDecoder();
+        if (!m_source.open(fd)) return false;
+        m_initialized = drwav_init(&m_wav, &FileSource::onRead, onSeek, onTell, &m_source, nullptr) == DRWAV_TRUE;
+        if (!m_initialized || m_wav.channels == 0 || m_wav.sampleRate == 0) {
+            closeDecoder();
             return false;
         }
+        m_currentFrame = 0;
         return true;
     }
 
-    size_t readFrames(audio_engine::core::AudioBuffer& buffer, size_t framesToRead) override {
+    size_t readFrames(core::AudioBuffer& buffer, size_t framesToRead) override {
         if (!m_initialized) return 0;
+        const size_t channels = m_wav.channels;
+        if (buffer.getNumChannels() < channels) return 0;
+        framesToRead = std::min(framesToRead, buffer.getNumFrames());
+        const size_t samples = framesToRead * channels;
+        size_t decoded = 0;
 
-        uint32_t channels = getNumChannels();
-        std::vector<float> tempBuffer(framesToRead * channels);
-        drwav_uint64 framesDecoded = drwav_read_pcm_frames_f32(&wavFrame, framesToRead, tempBuffer.data());
-
-        if (framesDecoded == 0) return 0;
-
-        m_currentFrame += framesDecoded;
-
-        for (uint32_t ch = 0; ch < channels; ++ch) {
-            double* dest = buffer.getWritePointer(ch);
-            for (size_t i = 0; i < framesDecoded; ++i) {
-                dest[i] = static_cast<double>(tempBuffer[i * channels + ch]);
+        if (m_wav.translatedFormatTag == DR_WAVE_FORMAT_IEEE_FLOAT && m_wav.bitsPerSample == 64) {
+            // Native read handles both little- and big-endian containers.
+            if (m_double.size() < samples) m_double.resize(samples);
+            decoded = static_cast<size_t>(drwav_read_pcm_frames(&m_wav, framesToRead, m_double.data()));
+            for (size_t ch = 0; ch < channels; ++ch) {
+                double* dst = buffer.getWritePointer(ch);
+                for (size_t i = 0; i < decoded; ++i) dst[i] = m_double[i * channels + ch];
+            }
+        } else if (m_wav.translatedFormatTag == DR_WAVE_FORMAT_PCM) {
+            // Integer PCM up to 32 bits is exact in s32 and then in double.
+            if (m_int.size() < samples) m_int.resize(samples);
+            decoded = static_cast<size_t>(drwav_read_pcm_frames_s32(&m_wav, framesToRead, m_int.data()));
+            constexpr double scale = 1.0 / 2147483648.0;
+            for (size_t ch = 0; ch < channels; ++ch) {
+                double* dst = buffer.getWritePointer(ch);
+                for (size_t i = 0; i < decoded; ++i) dst[i] = m_int[i * channels + ch] * scale;
+            }
+        } else {
+            if (m_float.size() < samples) m_float.resize(samples);
+            decoded = static_cast<size_t>(drwav_read_pcm_frames_f32(&m_wav, framesToRead, m_float.data()));
+            for (size_t ch = 0; ch < channels; ++ch) {
+                double* dst = buffer.getWritePointer(ch);
+                for (size_t i = 0; i < decoded; ++i) dst[i] = m_float[i * channels + ch];
             }
         }
-        return static_cast<size_t>(framesDecoded);
+        m_currentFrame += decoded;
+        return decoded;
     }
 
-    bool seekToFrame(uint64_t targetFrame) override { 
-        if (!m_initialized) return false;
-        if (drwav_seek_to_pcm_frame(&wavFrame, targetFrame) == DRWAV_TRUE) {
-            m_currentFrame = targetFrame;
-            return true;
-        }
-        return false;
+    bool seekToFrame(uint64_t frame) override {
+        if (!m_initialized || drwav_seek_to_pcm_frame(&m_wav, frame) != DRWAV_TRUE) return false;
+        m_currentFrame = frame;
+        return true;
     }
-    uint32_t getSampleRate() const override { return m_initialized ? wavFrame.sampleRate : 0; }
-    size_t getNumChannels() const override { return m_initialized ? wavFrame.channels : 0; }
-    uint32_t getBitsPerSample() const override { return m_initialized ? wavFrame.bitsPerSample : 0; }
-    uint64_t getTotalFrames() const override { return m_initialized ? wavFrame.totalPCMFrameCount : 0; }
+
+    uint32_t getSampleRate() const override { return m_initialized ? m_wav.sampleRate : 0; }
+    size_t getNumChannels() const override { return m_initialized ? m_wav.channels : 0; }
+    uint32_t getBitsPerSample() const override { return m_initialized ? m_wav.bitsPerSample : 0; }
+    uint64_t getTotalFrames() const override { return m_initialized ? m_wav.totalPCMFrameCount : 0; }
     uint64_t getCurrentFrame() const override { return m_currentFrame; }
+    Codec getCodec() const override {
+        return m_initialized && m_wav.container == drwav_container_aiff ? Codec::Aiff : Codec::Wav;
+    }
+
 private:
-    drwav wavFrame;
+    FileSource m_source;
+    drwav m_wav{};
     bool m_initialized = false;
-    int m_fd;
-    uint64_t m_currentFrame;
+    uint64_t m_currentFrame = 0;
+    std::vector<int32_t> m_int;
+    std::vector<float> m_float;
+    std::vector<double> m_double;
 
-    static size_t onRead(void* pUserData, void* pBufferOut, size_t bytesToRead) {
-        int fd = *static_cast<int*>(pUserData);
-        ssize_t bytesRead = read(fd, pBufferOut, bytesToRead);
-        return bytesRead > 0 ? static_cast<size_t>(bytesRead) : 0;
+    void closeDecoder() {
+        if (m_initialized) drwav_uninit(&m_wav);
+        m_initialized = false;
+        m_source.close();
     }
 
-    static drwav_bool32 onSeek(void* pUserData, int offset, drwav_seek_origin origin) {
-        int fd = *static_cast<int*>(pUserData);
-        int whence = SEEK_SET;
-        if (origin == DRWAV_SEEK_CUR) whence = SEEK_CUR;
-        if (origin == DRWAV_SEEK_END) whence = SEEK_END;
-
-        off_t newPos = lseek(fd, offset, whence);
-        return newPos >= 0 ? DRWAV_TRUE : DRWAV_FALSE;
+    static drwav_bool32 onSeek(void* user, int offset, drwav_seek_origin origin) {
+        return FileSource::onSeekImpl(user, offset, static_cast<int>(origin)) ? DRWAV_TRUE : DRWAV_FALSE;
     }
-
-    static drwav_bool32 onTell(void* pUserData, drwav_int64* pCursor) {
-        int fd = *static_cast<int*>(pUserData);
-        off_t current = lseek(fd, 0, SEEK_CUR);
-        if (current < 0) return DRWAV_FALSE;
-        *pCursor = static_cast<drwav_int64>(current);
+    static drwav_bool32 onTell(void* user, drwav_int64* cursor) {
+        int64_t value = 0;
+        FileSource::onTellImpl(user, &value);
+        *cursor = value;
         return DRWAV_TRUE;
     }
 };
+
+} // namespace decoders
+} // namespace audio_engine

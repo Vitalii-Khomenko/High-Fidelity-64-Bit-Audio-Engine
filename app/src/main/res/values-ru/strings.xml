@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="header_tag">64-бит движок</string>
+    <string name="starting_engine">Запуск движка</string>
+    <string name="toggle_theme">Сменить тему</string>
+    <string name="notification_channel">Воспроизведение</string>
+
+    <string name="tab_player">Плеер</string>
+    <string name="tab_library">Медиатека</string>
+    <string name="tab_sound">Звук</string>
+    <string name="tab_settings">Настройки</string>
+
+    <string name="action_play">Играть</string>
+    <string name="action_pause">Пауза</string>
+    <string name="action_next">Следующий</string>
+    <string name="action_previous">Предыдущий</string>
+    <string name="shuffle">Перемешать</string>
+    <string name="repeat_off">Повтор выкл.</string>
+    <string name="repeat_all">Повтор всего</string>
+    <string name="repeat_one">Повтор трека</string>
+
+    <string name="now_playing">Сейчас играет</string>
+    <string name="ready">Готов</string>
+    <string name="loading">Загрузка</string>
+    <string name="nothing_playing">Ничего не играет</string>
+    <string name="mode_music">Музыка</string>
+    <string name="mode_books">Книги</string>
+    <string name="eq_on">Экв. вкл.</string>
+    <string name="eq_off">Экв. выкл.</string>
+
+    <string name="queue">Очередь</string>
+    <plurals name="track_count">
+        <item quantity="one">%d трек</item>
+        <item quantity="few">%d трека</item>
+        <item quantity="many">%d треков</item>
+        <item quantity="other">%d трека</item>
+    </plurals>
+    <string name="queue_empty_title">Очередь пуста</string>
+    <string name="queue_empty_text">Добавьте папку с музыкой, просканируйте устройство или откройте DLNA-сервер в своей сети.</string>
+    <string name="open_library">Открыть медиатеку</string>
+    <string name="add">Добавить</string>
+    <string name="sort_name">А–Я</string>
+    <string name="sort_number">1–9</string>
+    <string name="save">Сохранить</string>
+    <string name="clear">Очистить</string>
+    <string name="remove">Убрать</string>
+    <string name="finished">Прослушано</string>
+    <string name="cancel">Отмена</string>
+    <string name="save_playlist">Сохранить плейлист</string>
+    <string name="playlist_name">Название плейлиста</string>
+    <string name="playlist_saved">Сохранено: «%1$s»</string>
+    <string name="clear_queue_title">Очистить очередь?</string>
+    <string name="clear_queue_text">Воспроизведение остановится, очередь опустеет. Плейлисты и папки останутся.</string>
+
+    <string name="folders">Папки</string>
+    <string name="folders_hint">Папки, к которым вы дали доступ. Вложенные папки учитываются.</string>
+    <string name="add_folder">Добавить папку</string>
+    <string name="access_lost">Доступ утерян — нажмите, чтобы выдать снова</string>
+    <string name="add_to_queue">В очередь</string>
+    <string name="scanning">Сканирование: %1$s…</string>
+    <string name="no_tracks_in">В «%1$s» нет поддерживаемых файлов</string>
+    <string name="added_tracks">Добавлено треков: %1$d (%2$s)</string>
+    <string name="added_one">Добавлено: %1$s</string>
+    <string name="already_queued">Уже в очереди</string>
+    <string name="device">Устройство</string>
+    <string name="device_hint">Все файлы FLAC, WAV, AIFF, MP3, DSF и DFF, проиндексированные системой.</string>
+    <string name="scan_device">Сканировать</string>
+    <string name="permission_denied_media">Нет разрешения. Добавьте папки вручную.</string>
+    <string name="network">Сеть</string>
+    <string name="network_hint">DLNA / UPnP медиасерверы в этой Wi-Fi сети. Трек скачивается перед воспроизведением.</string>
+    <string name="find_servers">Найти серверы</string>
+    <string name="rescan">Искать снова</string>
+    <string name="no_servers">Медиасерверы не ответили.</string>
+    <string name="playlists">Плейлисты</string>
+    <string name="no_playlists">Сохранённых плейлистов нет.</string>
+    <string name="save_current_queue">Сохранить очередь</string>
+    <string name="loaded_playlist">Загружен «%1$s» (%2$d)</string>
+    <string name="rename">Переименовать</string>
+    <string name="rename_playlist">Переименовать плейлист</string>
+    <string name="delete">Удалить</string>
+    <string name="delete_playlist">Удалить плейлист?</string>
+    <string name="back">Назад</string>
+    <string name="cannot_open_folder">Не удалось открыть папку</string>
+    <string name="play_folder">Играть папку</string>
+    <string name="add_folder_to_queue">В очередь</string>
+    <string name="play_all">Играть всё</string>
+    <string name="add_all">Добавить всё</string>
+
+    <string name="volume">Громкость</string>
+    <string name="volume_hint" formatted="false">Применяется в движке после буфера, поэтому слышна сразу. Для неизменённого сигнала держите 100% и регулируйте системной громкостью.</string>
+    <string name="speed">Скорость</string>
+    <string name="stretch_profile">Профиль растяжения</string>
+    <string name="profile_music">Музыка</string>
+    <string name="profile_speech">Речь</string>
+    <string name="speed_hint">На 1.00× сэмплы проходят без изменений. На других скоростях высота тона сохраняется (Sonic).</string>
+    <string name="equalizer">Эквалайзер</string>
+    <string name="on">Вкл.</string>
+    <string name="off">Выкл.</string>
+    <string name="eq_hint">Пять 64-битных biquad-полос. При подъёме полос общий уровень снижается автоматически, чтобы не было клиппинга.</string>
+    <string name="reset">Сброс</string>
+    <string name="replaygain">ReplayGain</string>
+    <string name="rg_track">Трек</string>
+    <string name="rg_album">Альбом</string>
+    <string name="replaygain_hint">Читает теги REPLAYGAIN из FLAC, MP3, WAV, AIFF и DSF и не поднимает уровень выше пика из тега. Действует со следующего трека.</string>
+
+    <string name="theme">Тема</string>
+    <string name="theme_system">Системная</string>
+    <string name="theme_dark">Тёмная</string>
+    <string name="theme_light">Светлая</string>
+    <string name="listening_mode">Режим прослушивания</string>
+    <string name="listening_mode_hint">«Книги» запоминают позицию в каждом файле и отмечают прослушанные главы. «Музыка» всегда начинает трек с начала.</string>
+    <string name="clear_finished">Сбросить отметки</string>
+    <string name="sleep_timer">Таймер сна</string>
+    <string name="minutes">%1$d мин</string>
+    <string name="sleep_hint">Плавно затихает последние 30 секунд и ставит на паузу.</string>
+    <string name="signal_path">Тракт сигнала</string>
+    <string name="path_source">Источник</string>
+    <string name="path_engine">Движок</string>
+    <string name="path_engine_value">64-бит float: декодирование, EQ, усиление</string>
+    <string name="path_output">Выход</string>
+    <string name="path_device">Устройство</string>
+    <string name="device_speaker">Встроенное</string>
+    <string name="underruns">Опустошения буфера</string>
+    <string name="signal_path_hint">В общем режиме Android смешивает звук всех приложений, поэтому устройство может передискретизировать сигнал. DSD преобразуется в PCM в движке.</string>
+    <string name="about">О программе</string>
+    <string name="version">Версия</string>
+    <string name="about_text">Собственный нативный движок на C++: 64-битная обработка, gapless, преобразование DSD в PCM и выход через Oboe. Свободный открытый код.</string>
+
+    <string name="error_cannot_play">Не удалось воспроизвести: %1$s</string>
+    <string name="error_audio_focus">Аудиофокус занят другим приложением</string>
+</resources>
