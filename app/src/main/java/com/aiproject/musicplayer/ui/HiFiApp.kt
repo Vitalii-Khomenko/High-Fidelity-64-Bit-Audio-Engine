@@ -42,6 +42,7 @@ import com.aiproject.musicplayer.playback.PlaybackService
 import com.aiproject.musicplayer.playback.PlayerCommands
 import com.aiproject.musicplayer.playback.PlayerState
 import com.aiproject.musicplayer.playback.TimeFormat
+import com.aiproject.musicplayer.ui.components.Cover
 import com.aiproject.musicplayer.ui.components.LogoMark
 import com.aiproject.musicplayer.ui.components.PixelIcons
 import com.aiproject.musicplayer.ui.components.SquareIconButton
@@ -165,6 +166,8 @@ private fun MiniPlayer(state: PlayerState, position: PlaybackPosition, onClick: 
             Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = 20.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            state.current?.let { Cover(it.uri, 40.dp, Modifier.size(40.dp), seed = it.album.ifBlank { it.folder }) }
+            Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(state.current?.title.orEmpty(), style = Aw.bodyStrong, color = aw.paper, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(

@@ -5,6 +5,7 @@ import android.net.Uri
 import android.provider.DocumentsContract
 import com.aiproject.musicplayer.playback.PlayableUri
 import com.aiproject.musicplayer.playback.Track
+import kotlinx.coroutines.ensureActive
 
 data class BrowseLocation(val documentId: String, val label: String)
 
@@ -15,6 +16,22 @@ data class BrowseEntry(
     val track: Track? = null,
     /** Ordering inside a folder: CUE tracks keep the sheet's order next to each other. */
     val sortKey: String = name,
+    /** The sheet a CUE track comes from. */
+    val cue: CueSheet? = null,
+)
+
+/** Size and modification time of a file, to tell whether its tags must be read again. */
+data class FileStamp(val size: Long, val modified: Long)
+
+/** One folder level as seen by the library indexer. */
+data class FolderLevel(
+    val folderUri: String,
+    val label: String,
+    val entries: List<BrowseEntry>,
+    /** Keyed by file URI. */
+    val stamps: Map<String, FileStamp>,
+    /** cover.jpg / folder.jpg / front.jpg … next to the tracks, "" when none. */
+    val coverUri: String,
 )
 
 /** Storage Access Framework folder access (persisted tree URIs). */
@@ -25,10 +42,76 @@ object SafTreeScanner {
         DocumentsContract.Document.COLUMN_DOCUMENT_ID,
         DocumentsContract.Document.COLUMN_DISPLAY_NAME,
         DocumentsContract.Document.COLUMN_MIME_TYPE,
+        DocumentsContract.Document.COLUMN_SIZE,
+        DocumentsContract.Document.COLUMN_LAST_MODIFIED,
     )
 
-    private data class Child(val id: String, val name: String, val mime: String) {
+    private data class Child(val id: String, val name: String, val mime: String, val size: Long = 0L, val modified: Long = 0L) {
         val isDirectory: Boolean get() = mime == DocumentsContract.Document.MIME_TYPE_DIR
+    }
+
+    /** Folder pictures in order of preference. */
+    private val COVER_NAMES = listOf("cover", "folder", "front", "album", "albumart", "albumartsmall")
+    private val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp")
+
+    /**
+     * Walks a tree depth-first and hands every folder level (with CUE sheets
+     * expanded, file stamps and the folder picture) to [visit].
+     */
+    suspend fun walk(
+        resolver: ContentResolver,
+        treeUri: Uri,
+        docId: String,
+        label: String,
+        visit: suspend (FolderLevel) -> Unit,
+        depth: Int = 0,
+    ) {
+        if (depth > MAX_DEPTH) return
+        kotlinx.coroutines.currentCoroutineContext().ensureActive()
+        val children = try {
+            listChildren(resolver, treeUri, docId)
+        } catch (_: Exception) {
+            return
+        }
+        val entries = levelEntries(resolver, treeUri, children, label)
+        if (entries.isNotEmpty()) {
+            val stamps = children.filter { !it.isDirectory }.associate {
+                DocumentsContract.buildDocumentUriUsingTree(treeUri, it.id).toString() to FileStamp(it.size, it.modified)
+            }
+            val cover = folderPicture(children)?.let { DocumentsContract.buildDocumentUriUsingTree(treeUri, it.id).toString() }
+            visit(FolderLevel(DocumentsContract.buildDocumentUriUsingTree(treeUri, docId).toString(), label, entries, stamps, cover.orEmpty()))
+        }
+        for (child in children) {
+            if (child.isDirectory) walk(resolver, treeUri, child.id, child.name, visit, depth + 1)
+        }
+    }
+
+    private fun folderPicture(children: List<Child>): Child? {
+        val images = children.filter { !it.isDirectory && SupportedFormats.extension(it.name) in IMAGE_EXTENSIONS }
+        for (name in COVER_NAMES) {
+            images.firstOrNull { it.name.substringBeforeLast('.').equals(name, ignoreCase = true) }?.let { return it }
+        }
+        // A single picture in an album folder is almost always its cover.
+        return images.singleOrNull()
+    }
+
+    /**
+     * The folder picture next to a document of an ExternalStorageProvider-style
+     * tree ("primary:Music/Album/01.flac" → "primary:Music/Album"); null when
+     * the provider's ids are not paths or there is no picture.
+     */
+    fun folderPictureFor(resolver: ContentResolver, documentUri: Uri): Uri? = try {
+        val docId = DocumentsContract.getDocumentId(documentUri)
+        val treeId = DocumentsContract.getTreeDocumentId(documentUri)
+        val parentId = docId.substringBeforeLast('/', "")
+        if (parentId.isEmpty() || !parentId.startsWith(treeId)) {
+            null
+        } else {
+            val tree = DocumentsContract.buildTreeDocumentUri(documentUri.authority, treeId)
+            folderPicture(listChildren(resolver, tree, parentId))?.let { DocumentsContract.buildDocumentUriUsingTree(tree, it.id) }
+        }
+    } catch (_: Exception) {
+        null
     }
 
     fun folderNameFromTreeUri(treeUri: Uri): String = try {
@@ -108,7 +191,7 @@ object SafTreeScanner {
                     trackNumber = t.number,
                 )
                 result += BrowseEntry("${cue.id}#${t.number}", t.title, isDirectory = false, track = track,
-                    sortKey = "${cue.name} %04d".format(index + 1))
+                    sortKey = "${cue.name} %04d".format(index + 1), cue = sheet)
             }
         }
         for (file in audio) {
@@ -159,9 +242,15 @@ object SafTreeScanner {
             val idCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
             val nameCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
             val mimeCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+            val sizeCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
+            val modifiedCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
             while (cursor.moveToNext()) {
                 val id = cursor.getString(idCol) ?: continue
-                result += Child(id, cursor.getString(nameCol).orEmpty(), cursor.getString(mimeCol).orEmpty())
+                result += Child(
+                    id, cursor.getString(nameCol).orEmpty(), cursor.getString(mimeCol).orEmpty(),
+                    if (sizeCol >= 0 && !cursor.isNull(sizeCol)) cursor.getLong(sizeCol) else 0L,
+                    if (modifiedCol >= 0 && !cursor.isNull(modifiedCol)) cursor.getLong(modifiedCol) else 0L,
+                )
             }
         }
         return result

@@ -20,14 +20,14 @@
 - **Process death.** The service does not restart itself after the system
   kills the process (`START_NOT_STICKY`); the queue and position are restored on
   the next start.
-- **Metadata.** Titles come from file names; tags and cover art are not read.
+- **Metadata.** The library is built from saved SAF folders only (not from the
+  MediaStore scan or DLNA). Tags cannot be edited. DLNA tracks have no covers.
 - **Real-device coverage.** The engine is verified on the host (sanitizers,
   simulated output). Behaviour with real HALs, Bluetooth stacks and OEM power
   management must be confirmed on phones (see [TESTING.md](TESTING.md)).
 
 ## Next steps
 
-1. Library by artist and album from the tags the engine already reads (title, artist, album, numbers, cover).
 2. Bit-perfect USB output, see [DIRECT_OUTPUT_PLAN.md](DIRECT_OUTPUT_PLAN.md).
 3. CUE sheets embedded in FLAC (`CUESHEET` block / `CUESHEET` comment).
 4. Streaming DLNA playback (HTTP range reads through `FileSource`).

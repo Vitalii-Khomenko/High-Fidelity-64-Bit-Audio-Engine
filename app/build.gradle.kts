@@ -25,8 +25,8 @@ android {
         applicationId = "com.aiproject.musicplayer"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1100
-        versionName = "0.11.0"
+        versionCode = 1200
+        versionName = "0.12.0"
 
         externalNativeBuild {
             cmake {

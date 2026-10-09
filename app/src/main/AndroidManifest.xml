@@ -63,6 +63,13 @@
             </intent-filter>
         </service>
 
+        <!-- Cover pictures for Android Auto browse items (read-only, library tracks only). -->
+        <provider
+            android:name=".library.CoverProvider"
+            android:authorities="${applicationId}.covers"
+            android:exported="true"
+            tools:ignore="ExportedContentProvider" />
+
         <!-- Headset, Bluetooth and notification media buttons. -->
         <receiver
             android:name="androidx.media.session.MediaButtonReceiver"

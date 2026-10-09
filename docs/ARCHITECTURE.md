@@ -26,7 +26,7 @@ the Android app.
 | `…playback` | `PlaybackService`, `PlaybackQueue`, `PlayerStore`, `AudioFocusPolicy`, models (`Track`, modes), `FormatText`, `OutputDevice` |
 | `…library` | SAF folder scanning and browsing (CUE sheets expanded into tracks, `CueSheet.kt`), MediaStore scan, DLNA discovery / protocol / download cache, sorting, supported formats |
 | `…playback` (`PlayableUri`) | A CUE track's URI is the audio file's URI plus `#hifi-cue=<startUs>-<endUs>`; `AudioEngine` splits it and passes the range to the engine |
-| `…db` | Room database for saved playlists |
+| `…db` | Room database: saved playlists and the library index (`LibraryEntities.kt`) |
 | `…ui` | Compose screens (Player, Library, Sound, Settings), theme and components |
 
 ## Playback service
@@ -93,6 +93,32 @@ Testing without a car: install the Desktop Head Unit from the SDK manager
 (`extras;google;auto`), enable developer mode and "Unknown sources" in Android
 Auto, then follow docs/TESTING.md.
 
+## Library index and covers
+
+`LibraryIndex` walks every saved folder (`SafTreeScanner.walk`), reads the
+tags of each file natively (`NativeTags`: title, artist, album, album artist,
+numbers, year, genre, embedded-cover flag) and its length from the headers
+(`DurationProbe.h`, no decoding), and stores one row per file or CUE track in
+`library_tracks`. Files whose size and modification time did not change are
+not read again; rows of deleted files and removed folders are dropped. It runs
+in the service scope: on the first start with folders but an empty index,
+after a folder is added, and from *Update library*.
+
+Albums group by album artist + album across folders, or by folder + album
+when there is no album artist (compilations stay together). Search uses a
+lower-cased text column because SQLite `LIKE` folds only ASCII case.
+
+`CoverArt` returns the embedded picture of a file, else the folder picture
+(`cover`, `folder`, `front`, `album`, `albumart` jpg/png/webp, or the only
+picture in the folder), scaled to 600 px, cached once per picture under
+`cacheDir/covers` (150 MB budget, least recently used dropped) and in memory
+per size. `CoverProvider` serves them to Android Auto; it only answers for
+library tracks and the track being played.
+
+`TrackProbe` completes queued tracks that lack tags or a length (from the
+index, else from the file) in the background; in *Books* mode titles keep the
+file names.
+
 ## Persistence
 
 | Where | What |
@@ -100,7 +126,8 @@ Auto, then follow docs/TESTING.md.
 | `player_state` preferences | queue (JSON), index, shuffle order, resume point, settings, per-file bookmarks (`pos_uri_<uri>`), saved SAF folders |
 | `audiobook_progress` preferences | finished files (Books mode) |
 | `ui` preferences | theme, whether permissions were requested |
-| Room `musicplayer_database` | saved playlists and their tracks (schema 4, migration 3→4) |
+| Room `musicplayer_database` | saved playlists and their tracks, the library index (schema 6; migrations 3→4, 4→5 album fields, 5→6 library) |
+| `cacheDir/covers` | scaled cover pictures (can be cleared by the system) |
 
 Keys are compatible with 0.8.x installs, so an update keeps the queue, folders,
 bookmarks and EQ.

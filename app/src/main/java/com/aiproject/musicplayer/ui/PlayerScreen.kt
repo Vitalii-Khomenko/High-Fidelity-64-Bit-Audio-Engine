@@ -52,6 +52,7 @@ import com.aiproject.musicplayer.playback.SortMode
 import com.aiproject.musicplayer.playback.TimeFormat
 import com.aiproject.musicplayer.playback.Track
 import com.aiproject.musicplayer.ui.components.AwButton
+import com.aiproject.musicplayer.ui.components.Cover
 import com.aiproject.musicplayer.ui.components.EmptyNote
 import com.aiproject.musicplayer.ui.components.Eyebrow
 import com.aiproject.musicplayer.ui.components.PixelIcons
@@ -80,8 +81,6 @@ fun PlayerScreen(
     var askSave by remember { mutableStateOf(false) }
     var askClear by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
-
-    DurationProbe(state.tracks, commands)
 
     LazyColumn(Modifier.fillMaxSize(), state = listState) {
         item(key = "now") { NowPlaying(state, position, commands, onOpenSound) }
@@ -203,13 +202,26 @@ private fun NowPlaying(state: PlayerState, position: PlaybackPosition, commands:
             else state.importing?.let { Eyebrow(stringResource(R.string.scanning, it), color = aw.violet) }
         }
         Spacer(Modifier.height(10.dp))
-        Text(
-            track?.title ?: stringResource(R.string.nothing_playing),
-            style = Aw.title, color = aw.head, maxLines = 2, overflow = TextOverflow.Ellipsis,
-        )
-        if (!track?.folder.isNullOrBlank()) {
-            Spacer(Modifier.height(4.dp))
-            Text(track!!.folder, style = Aw.small, color = aw.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (track != null) {
+                Cover(track.uri, 112.dp, Modifier.size(112.dp).pixelGlow(aw.cyan, aw.glow, 8.dp), seed = track.album.ifBlank { track.folder })
+                Spacer(Modifier.width(16.dp))
+            }
+            Column(Modifier.weight(1f)) {
+                Text(
+                    track?.title ?: stringResource(R.string.nothing_playing),
+                    style = Aw.title, color = aw.head, maxLines = 3, overflow = TextOverflow.Ellipsis,
+                )
+                if (track != null && track.artist.isNotBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(track.artist, style = Aw.body, color = aw.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                val where = track?.album?.ifBlank { null } ?: track?.folder
+                if (!where.isNullOrBlank()) {
+                    Spacer(Modifier.height(2.dp))
+                    Text(where, style = Aw.small, color = aw.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
         }
         Spacer(Modifier.height(12.dp))
         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -357,7 +369,7 @@ private fun QueueRow(
                     },
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
-                val meta = listOf(track.folder, TimeFormat.span(track.durationMs).takeIf { track.durationMs > 0 }.orEmpty())
+                val meta = listOf(track.artist.ifBlank { track.folder }, TimeFormat.span(track.durationMs).takeIf { track.durationMs > 0 }.orEmpty())
                     .filter { it.isNotBlank() }.joinToString("  ·  ")
                 if (meta.isNotEmpty()) Text(meta, style = Aw.small, color = aw.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }

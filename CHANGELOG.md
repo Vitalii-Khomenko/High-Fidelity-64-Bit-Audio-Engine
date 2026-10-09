@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.12.0 — 2026-10-09
+
+### Library
+
+- **Albums** (cover grid) and **Artists** pages built from the tags of the saved folders, with album and artist pages (play, shuffle, add) and **search** across albums, artists and tracks (Cyrillic case-insensitive). Folders, the device scan, DLNA and playlists moved to **Sources**.
+- The index is incremental: unchanged files are not read again, removed files and folders disappear. It is built in the background on first start, after adding a folder and from *Update library*; progress is shown.
+- Track lengths come from the file headers without decoding (FLAC, MP4, MP3 Xing/VBRI/CBR, Ogg, and a headers-only open for WAV, AIFF, DSD, WavPack, APE, TTA), so thousands of files index quickly.
+- Albums group by album artist and album across folders, or per folder for compilations without an album artist.
+
+### Covers
+
+- Embedded pictures (FLAC, ID3, MP4, APE, Ogg) and folder pictures (`cover.jpg`, `folder.jpg`, `front.jpg`, …), scaled and cached once per picture.
+- Shown in the player, the mini player, the library, on the **lock screen**, in the **notification** and in **Android Auto** (album grid; via a read-only content provider that only serves library tracks).
+
+### Player and queue
+
+- The player shows the cover, artist and album; queue rows show the artist.
+- Queued tracks get their tags and lengths in the background (from the library or the file); in Books mode titles keep the file names.
+- Android Auto: new **Albums** and **Artists** nodes; voice search also finds albums, artists and tracks of the library.
+
 ## 0.11.0 — 2026-10-09
 
 ### Formats

@@ -8,7 +8,10 @@ import android.support.v4.media.MediaBrowserCompat.MediaItem
 import android.support.v4.media.MediaDescriptionCompat
 import com.aiproject.musicplayer.R
 import com.aiproject.musicplayer.db.MusicDatabase
+import com.aiproject.musicplayer.db.AlbumRow
 import com.aiproject.musicplayer.db.PlaylistStore
+import com.aiproject.musicplayer.library.CoverProvider
+import com.aiproject.musicplayer.library.LibraryIndex
 import com.aiproject.musicplayer.library.LibraryFolders
 import com.aiproject.musicplayer.library.SafTreeScanner
 import kotlinx.coroutines.flow.first
@@ -45,10 +48,48 @@ class BrowseTree(private val context: Context) {
 
     private val playlists by lazy { PlaylistStore(MusicDatabase.getDatabase(context)) }
 
+    private val library by lazy { LibraryIndex(context) }
+
     fun rootChildren(): List<MediaItem> = listOf(
         browsable(MediaId.Queue, context.getString(R.string.queue), R.drawable.ic_auto_queue),
+        browsable(MediaId.Albums, context.getString(R.string.albums), R.drawable.ic_auto_playlist),
+        browsable(MediaId.Artists, context.getString(R.string.artists), R.drawable.ic_auto_queue),
         browsable(MediaId.Playlists, context.getString(R.string.playlists), R.drawable.ic_auto_playlist),
         browsable(MediaId.Folders, context.getString(R.string.folders), R.drawable.ic_auto_folder),
+    )
+
+    suspend fun albumsChildren(): List<MediaItem> = library.albums().first().map { albumItem(it) }
+
+    suspend fun artistsChildren(): List<MediaItem> = library.artists().first().map {
+        browsable(MediaId.Artist(it.artistKey), it.name.ifBlank { context.getString(R.string.unknown_artist) },
+            CoverProvider.uri(context, it.coverUri))
+    }
+
+    suspend fun artistChildren(key: String): List<MediaItem> = library.artistAlbums(key).map { albumItem(it) }
+
+    suspend fun albumChildren(key: String): List<MediaItem> =
+        library.albumTracks(key).mapIndexed { i, t -> playable(MediaId.AlbumTrack(key, i), t) }
+
+    suspend fun albumTracks(key: String): List<Track> = library.albumTracks(key)
+    suspend fun artistTracks(key: String): List<Track> = library.artistTracks(key)
+
+    /** Library tracks for a voice query: an album or artist by name, else matching titles. */
+    suspend fun searchLibrary(query: String): List<Track> {
+        val albums = library.albums().first()
+        albums.getOrNull(MediaSearch.bestMatch(query, albums.map { it.albumTitle }))?.let { return albumTracks(it.albumKey) }
+        val artists = library.artists().first()
+        artists.getOrNull(MediaSearch.bestMatch(query, artists.map { it.name }))?.let { return artistTracks(it.artistKey) }
+        return library.search(query, 100)
+    }
+
+    private fun albumItem(row: AlbumRow) = MediaItem(
+        MediaDescriptionCompat.Builder()
+            .setMediaId(MediaId.Album(row.albumKey).encode())
+            .setTitle(row.albumTitle)
+            .setSubtitle(row.albumArtistName.ifBlank { null })
+            .setIconUri(CoverProvider.uri(context, row.coverUri))
+            .build(),
+        MediaItem.FLAG_BROWSABLE or MediaItem.FLAG_PLAYABLE,
     )
 
     fun queueChildren(tracks: List<Track>, currentIndex: Int): List<MediaItem> {
@@ -109,16 +150,18 @@ class BrowseTree(private val context: Context) {
         MediaDescriptionCompat.Builder()
             .setMediaId(id.encode())
             .setTitle(track.title)
-            .setSubtitle(track.folder.ifBlank { null })
+            .setSubtitle(track.artist.ifBlank { track.folder }.ifBlank { null })
             .build()
 
     private fun playable(id: MediaId, track: Track) = MediaItem(description(id, track), MediaItem.FLAG_PLAYABLE)
 
-    private fun browsable(id: MediaId, title: String, icon: Int) = MediaItem(
+    private fun browsable(id: MediaId, title: String, icon: Int) = browsable(id, title, resourceUri(icon))
+
+    private fun browsable(id: MediaId, title: String, icon: Uri) = MediaItem(
         MediaDescriptionCompat.Builder()
             .setMediaId(id.encode())
             .setTitle(title)
-            .setIconUri(resourceUri(icon))
+            .setIconUri(icon)
             .build(),
         MediaItem.FLAG_BROWSABLE,
     )

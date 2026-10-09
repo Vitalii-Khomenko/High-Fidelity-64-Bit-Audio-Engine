@@ -130,4 +130,21 @@
     <string name="error_audio_focus">Another app is holding audio focus</string>
     <string name="folder_access_temporary">%1$s: this storage only allows access until the app restarts; add it again afterwards</string>
     <string name="playlist_error">The playlist could not be saved or read</string>
+    <!-- Library index -->
+    <string name="albums">Albums</string>
+    <string name="artists">Artists</string>
+    <string name="sources">Sources</string>
+    <string name="tracks">Tracks</string>
+    <string name="search_library">Search albums, artists, tracks</string>
+    <string name="update_library">Update library</string>
+    <string name="library_updating">Reading tags: %1$s · %2$d</string>
+    <string name="library_update_failed">The library could not be updated</string>
+    <string name="library_empty_title">No albums yet</string>
+    <string name="library_empty_text">Add a music folder under Sources. Its tags and covers are read in the background and grouped by album and artist.</string>
+    <string name="various_artists">Various artists</string>
+    <string name="unknown_artist">Unknown artist</string>
+    <plurals name="album_count">
+        <item quantity="one">%d album</item>
+        <item quantity="other">%d albums</item>
+    </plurals>
 </resources>

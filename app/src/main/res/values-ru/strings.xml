@@ -131,4 +131,23 @@
     <string name="error_audio_focus">Аудиофокус занят другим приложением</string>
     <string name="folder_access_temporary">%1$s: это хранилище даёт доступ только до перезапуска приложения, потом папку нужно добавить снова</string>
     <string name="playlist_error">Не удалось сохранить или прочитать плейлист</string>
+    <!-- Медиатека -->
+    <string name="albums">Альбомы</string>
+    <string name="artists">Исполнители</string>
+    <string name="sources">Источники</string>
+    <string name="tracks">Треки</string>
+    <string name="search_library">Поиск альбомов, исполнителей, треков</string>
+    <string name="update_library">Обновить медиатеку</string>
+    <string name="library_updating">Чтение тегов: %1$s · %2$d</string>
+    <string name="library_update_failed">Не удалось обновить медиатеку</string>
+    <string name="library_empty_title">Альбомов пока нет</string>
+    <string name="library_empty_text">Добавьте папку с музыкой в разделе «Источники». Теги и обложки читаются в фоне и группируются по альбомам и исполнителям.</string>
+    <string name="various_artists">Разные исполнители</string>
+    <string name="unknown_artist">Неизвестный исполнитель</string>
+    <plurals name="album_count">
+        <item quantity="one">%d альбом</item>
+        <item quantity="few">%d альбома</item>
+        <item quantity="many">%d альбомов</item>
+        <item quantity="other">%d альбома</item>
+    </plurals>
 </resources>

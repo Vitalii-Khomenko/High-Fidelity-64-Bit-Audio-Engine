@@ -42,4 +42,10 @@ class MediaIdsTest {
         assertEquals(400 to 700, queueWindow(1000, 500, max = 300))
         assertEquals(700 to 1000, queueWindow(1000, 990, max = 300))
     }
+
+    @Test fun `library ids round-trip`() {
+        for (id in listOf(MediaId.Albums, MediaId.Artists, MediaId.Album("a|abba|gold"), MediaId.Artist("кино"), MediaId.AlbumTrack("f|content://x|y", 7))) {
+            org.junit.Assert.assertEquals(id, MediaId.parse(id.encode()))
+        }
+    }
 }

@@ -13,6 +13,11 @@ sealed interface MediaId {
     data object Queue : MediaId
     data object Playlists : MediaId
     data object Folders : MediaId
+    data object Albums : MediaId
+    data object Artists : MediaId
+    data class Album(val key: String) : MediaId
+    data class Artist(val key: String) : MediaId
+    data class AlbumTrack(val key: String, val index: Int) : MediaId
     data class QueueTrack(val index: Int, val uri: String) : MediaId
     data class Playlist(val id: Int) : MediaId
     data class PlaylistTrack(val playlistId: Int, val index: Int) : MediaId
@@ -25,6 +30,11 @@ sealed interface MediaId {
         Queue -> "queue"
         Playlists -> "playlists"
         Folders -> "folders"
+        Albums -> "albums"
+        Artists -> "artists"
+        is Album -> join("al", key)
+        is Artist -> join("ar", key)
+        is AlbumTrack -> join("at", key, index.toString())
         is QueueTrack -> join("qt", index.toString(), uri)
         is Playlist -> join("pl", id.toString())
         is PlaylistTrack -> join("pt", playlistId.toString(), index.toString())
@@ -48,6 +58,8 @@ sealed interface MediaId {
                 "queue" -> return Queue
                 "playlists" -> return Playlists
                 "folders" -> return Folders
+                "albums" -> return Albums
+                "artists" -> return Artists
             }
             val parts = value.split(SEPARATOR)
             val fields = try {
@@ -62,6 +74,9 @@ sealed interface MediaId {
                     "pt" -> PlaylistTrack(fields[0].toInt(), fields[1].toInt())
                     "fo" -> Folder(fields[0], fields[1], fields[2])
                     "ft" -> FolderTrack(fields[0], fields[1], fields[2], fields[3].toInt())
+                    "al" -> Album(fields[0])
+                    "ar" -> Artist(fields[0])
+                    "at" -> AlbumTrack(fields[0], fields[1].toInt())
                     else -> null
                 }
             } catch (_: RuntimeException) {

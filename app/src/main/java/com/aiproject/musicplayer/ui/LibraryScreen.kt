@@ -26,6 +26,25 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.graphics.RectangleShape
+import com.aiproject.musicplayer.db.AlbumRow
+import com.aiproject.musicplayer.db.ArtistRow
+import com.aiproject.musicplayer.library.LibraryIndex
+import com.aiproject.musicplayer.ui.components.Cover
+import com.aiproject.musicplayer.ui.components.Segmented
+import com.aiproject.musicplayer.ui.components.pixelGlow
+import kotlinx.coroutines.delay
+import kotlin.random.Random
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Add
@@ -89,29 +108,345 @@ private sealed interface LibraryPage {
     data object Home : LibraryPage
     data class Folder(val root: LibraryFolderEntry, val stack: List<BrowseLocation>) : LibraryPage
     data class Network(val server: DlnaServer, val stack: List<DlnaContainer>) : LibraryPage
+    data class Album(val album: AlbumRow, val back: LibraryPage) : LibraryPage
+    data class Artist(val artist: ArtistRow) : LibraryPage
 }
 
+enum class LibraryMode(val label: Int) { ALBUMS(R.string.albums), ARTISTS(R.string.artists), SOURCES(R.string.sources) }
+
 @Composable
-fun LibraryScreen(state: PlayerState, commands: PlayerCommands, onPlayed: () -> Unit) {
+fun LibraryScreen(state: PlayerState, commands: PlayerCommands, onPlayed: () -> Unit, initialMode: LibraryMode = LibraryMode.ALBUMS) {
     var page by remember { mutableStateOf<LibraryPage>(LibraryPage.Home) }
+    var mode by rememberSaveable { mutableStateOf(initialMode) }
     BackHandler(enabled = page != LibraryPage.Home) {
         page = when (val p = page) {
             is LibraryPage.Folder -> if (p.stack.size > 1) p.copy(stack = p.stack.dropLast(1)) else LibraryPage.Home
             is LibraryPage.Network -> if (p.stack.isNotEmpty()) p.copy(stack = p.stack.dropLast(1)) else LibraryPage.Home
+            is LibraryPage.Album -> p.back
+            is LibraryPage.Artist -> LibraryPage.Home
             LibraryPage.Home -> LibraryPage.Home
         }
     }
     when (val p = page) {
-        LibraryPage.Home -> LibraryHome(state, commands, onPlayed, onOpen = { page = it })
+        LibraryPage.Home -> Column(Modifier.fillMaxSize()) {
+            Segmented(
+                LibraryMode.entries, mode, label = { stringResource(it.label) }, onSelect = { mode = it },
+                modifier = Modifier.padding(horizontal = 20.dp).padding(top = 10.dp, bottom = 6.dp), tone = aw().violet,
+            )
+            state.libraryUpdate?.let { progress ->
+                Row(Modifier.padding(horizontal = 20.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(12.dp), color = aw().violet, strokeWidth = 1.5.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        stringResource(R.string.library_updating, progress.folder, progress.tracks),
+                        style = Aw.small, color = aw().muted, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            when (mode) {
+                LibraryMode.ALBUMS, LibraryMode.ARTISTS -> CollectionHome(
+                    state, commands, mode, onPlayed,
+                    onOpen = { page = it },
+                    onShowSources = { mode = LibraryMode.SOURCES },
+                )
+                LibraryMode.SOURCES -> SourcesHome(state, commands, onPlayed, onOpen = { page = it })
+            }
+        }
         is LibraryPage.Folder -> FolderBrowser(p, commands, onPlayed, onNavigate = { page = it })
         is LibraryPage.Network -> NetworkBrowser(p, commands, onPlayed, onNavigate = { page = it })
+        is LibraryPage.Album -> AlbumPage(p, commands, onPlayed, onBack = { page = p.back })
+        is LibraryPage.Artist -> ArtistPage(p, commands, onPlayed, onBack = { page = LibraryPage.Home }, onOpen = { page = it })
     }
 }
 
-// ── Home ────────────────────────────────────────────────────────────────────
+@Composable
+private fun aw() = Aw.colors
+
+// ── Albums and artists ──────────────────────────────────────────────────────
 
 @Composable
-private fun LibraryHome(state: PlayerState, commands: PlayerCommands, onPlayed: () -> Unit, onOpen: (LibraryPage) -> Unit) {
+private fun rememberLibraryIndex(): LibraryIndex? {
+    val context = LocalContext.current
+    val preview = LocalInspectionMode.current
+    return remember { if (preview) null else LibraryIndex(context) }
+}
+
+@Composable
+private fun CollectionHome(
+    state: PlayerState,
+    commands: PlayerCommands,
+    mode: LibraryMode,
+    onPlayed: () -> Unit,
+    onOpen: (LibraryPage) -> Unit,
+    onShowSources: () -> Unit,
+) {
+    val aw = Aw.colors
+    val index = rememberLibraryIndex()
+    val albums by remember(index) { index?.albums() ?: flowOf(emptyList()) }.collectAsState(initial = emptyList())
+    val artists by remember(index) { index?.artists() ?: flowOf(emptyList()) }.collectAsState(initial = emptyList())
+    var query by rememberSaveable { mutableStateOf("") }
+    var found by remember { mutableStateOf<List<Track>>(emptyList()) }
+    LaunchedEffect(query, index) {
+        found = if (query.trim().length >= 2 && index != null) {
+            delay(200)
+            runCatching { index.search(query) }.getOrDefault(emptyList())
+        } else {
+            emptyList()
+        }
+    }
+    val q = query.trim().lowercase()
+    val shownAlbums = if (q.isEmpty()) albums else albums.filter { q in it.albumTitle.lowercase() || q in it.albumArtistName.lowercase() }
+    val shownArtists = if (q.isEmpty()) artists else artists.filter { q in it.name.lowercase() }
+
+    if (albums.isEmpty() && state.libraryUpdate == null) {
+        EmptyNote(
+            stringResource(R.string.library_empty_title), stringResource(R.string.library_empty_text),
+            Modifier.padding(horizontal = 20.dp),
+        ) {
+            AwButton(stringResource(R.string.sources), onShowSources, tone = aw.violet)
+            AwButton(stringResource(R.string.update_library), commands::updateLibrary)
+        }
+        return
+    }
+
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(150.dp),
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        item(span = { GridItemSpan(maxLineSpan) }) {
+            SearchField(query, onChange = { query = it })
+        }
+        if (mode == LibraryMode.ALBUMS) {
+            items(shownAlbums, key = { "al-${it.albumKey}" }) { album ->
+                AlbumTile(album) { onOpen(LibraryPage.Album(album, LibraryPage.Home)) }
+            }
+        } else {
+            items(shownArtists, key = { "ar-${it.artistKey}" }, span = { GridItemSpan(maxLineSpan) }) { artist ->
+                ArtistRowItem(artist) { onOpen(LibraryPage.Artist(artist)) }
+            }
+        }
+        if (found.isNotEmpty()) {
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                SectionHeader("—", stringResource(R.string.tracks), aw.cyan, Modifier.padding(top = 10.dp))
+            }
+            items(found, key = { "t-${it.uri}" }, span = { GridItemSpan(maxLineSpan) }) { track ->
+                LibraryTrackRow(track, showArtist = true, onPlay = {
+                    commands.setQueue(found, found.indexOf(track), true)
+                    onPlayed()
+                }, onAdd = { commands.addTracks(listOf(track)) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchField(query: String, onChange: (String) -> Unit) {
+    val aw = Aw.colors
+    OutlinedTextField(
+        value = query,
+        onValueChange = onChange,
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        placeholder = { Text(stringResource(R.string.search_library), style = Aw.small, color = aw.muted) },
+        leadingIcon = { Icon(Icons.Outlined.Search, null, tint = aw.muted, modifier = Modifier.size(18.dp)) },
+        trailingIcon = {
+            if (query.isNotEmpty()) {
+                SquareIconButton(Icons.Outlined.Close, stringResource(R.string.clear), { onChange("") }, size = 36.dp, iconSize = 16.dp, tint = aw.muted)
+            }
+        },
+        singleLine = true,
+        textStyle = Aw.body,
+        shape = RectangleShape,
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = aw.violet, unfocusedBorderColor = aw.line,
+            focusedTextColor = aw.paper, unfocusedTextColor = aw.paper, cursorColor = aw.violet,
+        ),
+    )
+}
+
+@Composable
+private fun AlbumTile(album: AlbumRow, onClick: () -> Unit) {
+    val aw = Aw.colors
+    Column(Modifier.clickable(onClick = onClick)) {
+        Cover(album.coverUri, 160.dp, Modifier.fillMaxWidth().aspectRatio(1f), seed = album.albumKey)
+        Spacer(Modifier.height(8.dp))
+        Text(album.albumTitle, style = Aw.bodyStrong, color = aw.paper, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(
+            listOfNotNull(artistLabel(album), album.year).joinToString("  ·  "),
+            style = Aw.small, color = aw.muted, maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun artistLabel(album: AlbumRow): String = when {
+    album.artists > 1 && album.albumArtistName.isBlank() -> stringResource(R.string.various_artists)
+    album.albumArtistName.isBlank() -> stringResource(R.string.unknown_artist)
+    else -> album.albumArtistName
+}
+
+@Composable
+private fun ArtistRowItem(artist: ArtistRow, onClick: () -> Unit) {
+    val aw = Aw.colors
+    val context = LocalContext.current
+    Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Cover(artist.coverUri, 52.dp, Modifier.size(52.dp), seed = artist.artistKey)
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text(artist.name.ifBlank { stringResource(R.string.unknown_artist) }, style = Aw.body, color = aw.paper, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                context.resources.getQuantityString(R.plurals.album_count, artist.albums, artist.albums) + "  ·  " +
+                    context.resources.getQuantityString(R.plurals.track_count, artist.tracks, artist.tracks),
+                style = Aw.small, color = aw.muted,
+            )
+        }
+    }
+}
+
+/** Plays [tracks]; with [shuffle] the order is shuffled and the start is random. */
+private fun play(commands: PlayerCommands, tracks: List<Track>, start: Int, shuffle: Boolean) {
+    if (tracks.isEmpty()) return
+    commands.setShuffle(shuffle)
+    commands.setQueue(tracks, if (shuffle) Random.nextInt(tracks.size) else start, true)
+}
+
+@Composable
+private fun AlbumPage(page: LibraryPage.Album, commands: PlayerCommands, onPlayed: () -> Unit, onBack: () -> Unit) {
+    val aw = Aw.colors
+    val context = LocalContext.current
+    val index = rememberLibraryIndex()
+    val album = page.album
+    var tracks by remember(album.albumKey) { mutableStateOf<List<Track>?>(null) }
+    LaunchedEffect(album.albumKey) { tracks = index?.albumTracks(album.albumKey).orEmpty() }
+    val list = tracks.orEmpty()
+    val various = list.map { it.artist }.distinct().size > 1
+    LazyColumn(Modifier.fillMaxSize()) {
+        item {
+            Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 20.dp, top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                SquareIconButton(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.back), onBack)
+                Spacer(Modifier.width(6.dp))
+                Eyebrow(stringResource(R.string.albums), Modifier.weight(1f), color = aw.violet)
+            }
+            Row(Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) {
+                Cover(album.coverUri, 132.dp, Modifier.size(132.dp).pixelGlow(aw.violet, aw.glow, 8.dp), seed = album.albumKey)
+                Spacer(Modifier.width(16.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(album.albumTitle, style = Aw.heading, color = aw.head, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(4.dp))
+                    Text(artistLabel(album), style = Aw.body, color = aw.text, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        listOfNotNull(
+                            album.year,
+                            context.resources.getQuantityString(R.plurals.track_count, album.tracks, album.tracks),
+                            TimeFormat.span(album.durationMs).ifEmpty { null },
+                        ).joinToString("  ·  "),
+                        style = Aw.mono, color = aw.muted,
+                    )
+                }
+            }
+            Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AwButton(stringResource(R.string.play_all), { play(commands, list, 0, false); onPlayed() }, Modifier.weight(1f), tone = aw.violet, enabled = list.isNotEmpty())
+                AwButton(stringResource(R.string.shuffle), { play(commands, list, 0, true); onPlayed() }, Modifier.weight(1f), enabled = list.isNotEmpty())
+                AwButton(stringResource(R.string.add), {
+                    Toast.makeText(context, context.getString(R.string.added_tracks, commands.addTracks(list), album.albumTitle), Toast.LENGTH_SHORT).show()
+                }, Modifier.weight(1f), enabled = list.isNotEmpty())
+            }
+            Box(Modifier.fillMaxWidth().height(1.dp).background(aw.line))
+        }
+        if (tracks == null) {
+            item { Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(20.dp), color = aw.violet, strokeWidth = 1.5.dp) } }
+        }
+        itemsIndexed(list, key = { _, t -> t.uri }) { i, track ->
+            LibraryTrackRow(track, showArtist = various, number = track.trackNumber.takeIf { it > 0 } ?: (i + 1), onPlay = {
+                play(commands, list, i, false)
+                onPlayed()
+            }, onAdd = {
+                val added = commands.addTracks(listOf(track))
+                Toast.makeText(context, if (added > 0) context.getString(R.string.added_one, track.title) else context.getString(R.string.already_queued), Toast.LENGTH_SHORT).show()
+            })
+        }
+        item { Spacer(Modifier.height(24.dp)) }
+    }
+}
+
+@Composable
+private fun ArtistPage(page: LibraryPage.Artist, commands: PlayerCommands, onPlayed: () -> Unit, onBack: () -> Unit, onOpen: (LibraryPage) -> Unit) {
+    val aw = Aw.colors
+    val context = LocalContext.current
+    val index = rememberLibraryIndex()
+    val artist = page.artist
+    var albums by remember(artist.artistKey) { mutableStateOf<List<AlbumRow>>(emptyList()) }
+    LaunchedEffect(artist.artistKey) { albums = index?.artistAlbums(artist.artistKey).orEmpty() }
+    val scope = rememberCoroutineScope()
+    fun playAll(shuffle: Boolean) = scope.launch {
+        val tracks = index?.artistTracks(artist.artistKey).orEmpty()
+        play(commands, tracks, 0, shuffle)
+        if (tracks.isNotEmpty()) onPlayed()
+    }
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(150.dp),
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        item(span = { GridItemSpan(maxLineSpan) }) {
+            Column {
+                Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    SquareIconButton(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.back), onBack)
+                    Spacer(Modifier.width(6.dp))
+                    Eyebrow(stringResource(R.string.artists), Modifier.weight(1f), color = aw.violet)
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(artist.name.ifBlank { stringResource(R.string.unknown_artist) }, style = Aw.title, color = aw.head)
+                Text(
+                    context.resources.getQuantityString(R.plurals.album_count, artist.albums, artist.albums) + "  ·  " +
+                        context.resources.getQuantityString(R.plurals.track_count, artist.tracks, artist.tracks),
+                    style = Aw.mono, color = aw.muted,
+                )
+                Spacer(Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AwButton(stringResource(R.string.play_all), { playAll(false) }, Modifier.weight(1f), tone = aw.violet)
+                    AwButton(stringResource(R.string.shuffle), { playAll(true) }, Modifier.weight(1f))
+                }
+            }
+        }
+        items(albums, key = { it.albumKey }) { album ->
+            AlbumTile(album) { onOpen(LibraryPage.Album(album, page)) }
+        }
+    }
+}
+
+@Composable
+private fun LibraryTrackRow(track: Track, showArtist: Boolean, number: Int? = null, onPlay: () -> Unit, onAdd: () -> Unit) {
+    val aw = Aw.colors
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onPlay).padding(start = 20.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (number != null) {
+            Text("%02d".format(number), style = Aw.mono, color = aw.muted, modifier = Modifier.width(36.dp))
+        }
+        Column(Modifier.weight(1f)) {
+            Text(track.title, style = Aw.body, color = aw.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            val meta = listOfNotNull(
+                track.artist.takeIf { showArtist && it.isNotBlank() },
+                track.album.takeIf { showArtist && number == null && it.isNotBlank() },
+                TimeFormat.clock(track.durationMs).takeIf { track.durationMs > 0 },
+            ).joinToString("  ·  ")
+            if (meta.isNotEmpty()) Text(meta, style = Aw.small, color = aw.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        SquareIconButton(Icons.Outlined.Add, stringResource(R.string.add_to_queue), onAdd, size = 40.dp, iconSize = 18.dp)
+    }
+}
+
+// ── Sources: folders, device, network, playlists ────────────────────────────
+
+@Composable
+private fun SourcesHome(state: PlayerState, commands: PlayerCommands, onPlayed: () -> Unit, onOpen: (LibraryPage) -> Unit) {
     val aw = Aw.colors
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -152,6 +487,7 @@ private fun LibraryHome(state: PlayerState, commands: PlayerCommands, onPlayed: 
             accessible = LibraryFolders.accessibleUris(context)
             if (!added.persisted) toast(context.getString(R.string.folder_access_temporary, added.entry.label))
             addFromFolder(added.entry, play = state.tracks.isEmpty())
+            commands.updateLibrary()
         }
     }
 
@@ -181,6 +517,7 @@ private fun LibraryHome(state: PlayerState, commands: PlayerCommands, onPlayed: 
                 if (ok) SquareIconButton(Icons.Outlined.Add, stringResource(R.string.add_to_queue), { addFromFolder(entry, play = false) }, size = 40.dp, iconSize = 18.dp)
                 SquareIconButton(Icons.Outlined.Close, stringResource(R.string.remove), {
                     LibraryFolders.remove(context, entry)
+                    commands.forgetLibraryFolder(entry.uriString)
                     folders = LibraryFolders.load(context)
                     accessible = LibraryFolders.accessibleUris(context)
                 }, size = 40.dp, iconSize = 16.dp, tint = aw.muted)
@@ -189,6 +526,9 @@ private fun LibraryHome(state: PlayerState, commands: PlayerCommands, onPlayed: 
         item {
             Row(Modifier.padding(horizontal = 20.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 AwButton(stringResource(R.string.add_folder), { pickFolder.launch(null) }, tone = aw.violet, icon = Icons.Outlined.Add)
+                if (folders.isNotEmpty()) {
+                    AwButton(stringResource(R.string.update_library), commands::updateLibrary, enabled = state.libraryUpdate == null)
+                }
             }
             state.importing?.let { label ->
                 Row(Modifier.padding(horizontal = 20.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {

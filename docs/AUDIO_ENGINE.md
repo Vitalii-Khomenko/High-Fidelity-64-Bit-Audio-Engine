@@ -274,8 +274,10 @@ heard rather than what was decoded 300 ms earlier.
 `NativeTags` (no instance; the caller keeps the fd): `readTags(fd)` returns the
 fields as NUL-separated UTF-8 bytes (JNI `NewStringUTF` cannot take 4-byte
 UTF-8), `readPicture(fd)` the cover bytes, `probeDurationMs(fd)` the length
-from the engine's decoders (APE, WavPack, TTA and DSD, which Android's
-`MediaMetadataRetriever` does not know).
+without decoding (`decoders/DurationProbe.h`: FLAC STREAMINFO, MP4 `mvhd`,
+Xing / VBRI frame counts or the CBR byte count for MP3, the last Ogg granule
+position, and a headers-only decoder open for the other formats), used to
+index thousands of files quickly.
 
 A per-instance lock makes "check the pre-load generation, then publish the
 decoder" atomic with `clearNext()` and `load()`, so a cancelled pre-load can

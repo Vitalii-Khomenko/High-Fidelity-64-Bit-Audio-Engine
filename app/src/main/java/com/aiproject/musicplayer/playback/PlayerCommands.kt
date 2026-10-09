@@ -24,7 +24,6 @@ interface PlayerCommands {
     fun clearQueue()
     fun sortQueue(mode: SortMode)
     fun clearPlayedMarks()
-    fun updateDurations(durations: Map<String, Long>)
     fun readSpectrum(bands: FloatArray)
 
     /**
@@ -35,4 +34,10 @@ interface PlayerCommands {
 
     /** Adds every playable file MediaStore knows about. */
     fun importDeviceLibrary()
+
+    /** Re-reads the saved folders into the library index (incremental, in the background). */
+    fun updateLibrary()
+
+    /** Drops a removed folder from the library index. */
+    fun forgetLibraryFolder(treeUri: String)
 }

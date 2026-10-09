@@ -10,6 +10,7 @@
 #include "test_util.h"
 
 #include "decoders/DecoderFactory.h"
+#include "decoders/DurationProbe.h"
 #include "decoders/RangeDecoder.h"
 #include "tags/TagReader.h"
 
@@ -813,6 +814,41 @@ void testTextCodec() {
     CHECK(tags::id3GenreText("(17)") == "Rock" && tags::id3GenreText("(17)Indie") == "Indie" && tags::id3GenreText("8") == "Jazz");
 }
 
+int64_t probeMs(const Bytes& file) {
+    const int fd = tempFile(file);
+    const int64_t ms = decoders::DurationProbe(fd).durationMs();
+    close(fd);
+    return ms;
+}
+
+int64_t probeMs(const std::string& path) {
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    CHECK(fd >= 0);
+    const int64_t ms = decoders::DurationProbe(fd).durationMs();
+    close(fd);
+    return ms;
+}
+
+void testDurationProbe(const std::string& root) {
+    const Pcm p = makePcm(44100, 2, 16, 50000);   // 1133 ms
+    CHECK(probeMs(encodeWavPack(p)) == 1133);
+    CHECK(probeMs(encodeTta(p)) == 1133);
+    CHECK(probeMs(encodeApe(p)) == 1133);
+    CHECK(probeMs(wavBytes(p)) == 1133);
+    std::vector<float> opus(48000 * 2, 0.1f);
+    CHECK(probeMs(encodeOggOpus(opus, 2, {})) == 1000);
+    CHECK(probeMs(Bytes(4096, 0)) == 0);
+    if (!root.empty()) {
+        CHECK(probeMs(root + "/tone.flac") == 1200);
+        CHECK(probeMs(root + "/tone.ogg") == 1200);
+        const int64_t vbr = probeMs(root + "/tone-vbr.mp3");     // Xing frame count
+        const int64_t cbr = probeMs(root + "/tone-cbr.mp3");     // byte count / bitrate
+        std::printf("  Duration probe: MP3 VBR %lld ms, CBR %lld ms (1200 expected)\n", (long long)vbr, (long long)cbr);
+        CHECK(vbr >= 1200 && vbr <= 1260);
+        CHECK(cbr >= 1150 && cbr <= 1260);
+    }
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     testLosslessFormats();
@@ -826,6 +862,7 @@ int main(int argc, char** argv) {
     testId3Tags();
     testApeAndMp4Tags();
     if (argc >= 2) testVorbis(std::string(argv[1]) + "/tone.ogg");
+    testDurationProbe(argc >= 2 ? argv[1] : "");
     std::puts("Format tests passed.");
     return 0;
 }

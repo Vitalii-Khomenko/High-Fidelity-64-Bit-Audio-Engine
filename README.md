@@ -37,15 +37,16 @@ Details: [docs/AUDIO_ENGINE.md](docs/AUDIO_ENGINE.md).
 
 ## The app
 
-- **Player** — now playing with format chips (codec, rate, bits, DSD, ReplayGain, output), a pixel spectrum of what is actually being heard, transport, shuffle / repeat, and the queue.
-- **Library** — folders through the Storage Access Framework (with a folder browser), a device scan (MediaStore), DLNA / UPnP servers with folder navigation, and saved playlists.
+- **Player** — cover, title, artist and album, format chips (codec, rate, bits, DSD, ReplayGain, output), a pixel spectrum of what is actually being heard, transport, shuffle / repeat, and the queue.
+- **Library** — **albums** (cover grid) and **artists** built from the tags of your folders, with search; **sources**: folders through the Storage Access Framework (with a folder browser and CUE sheets), a device scan (MediaStore), DLNA / UPnP servers with folder navigation, and saved playlists.
 - **Sound** — volume, speed and time-stretch profile, 5-band EQ, ReplayGain mode.
 - **Settings** — theme (system / dark / light), *Music* or *Books* listening mode (Books keeps a bookmark per file and marks finished chapters), sleep timer with a 30-second fade, and the signal path from file to device.
 
 Playback lives in a foreground service with a media session: notification,
 lock screen, headset and Bluetooth buttons, audio focus and "becoming noisy"
-all work without the UI. **Android Auto** shows the queue, saved playlists and
-folders and supports voice search ("play … on HiFi Player"). The visual design follows [airwitech.com](https://airwitech.com):
+all work without the UI; the cover shows on the lock screen and in the
+notification. **Android Auto** shows the queue, albums (with covers), artists,
+saved playlists and folders and supports voice search ("play … on HiFi Player"). The visual design follows [airwitech.com](https://airwitech.com):
 ink and paper colours, violet / amber / cyan tones, Sora and Source Sans 3,
 square shapes, hairline rules and pixel glyphs.
 

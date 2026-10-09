@@ -7,10 +7,15 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [PlaylistTrackEntity::class, PlaylistEntity::class], version = 5, exportSchema = false)
+@Database(
+    entities = [PlaylistTrackEntity::class, PlaylistEntity::class, LibraryTrackEntity::class],
+    version = 6,
+    exportSchema = false,
+)
 abstract class MusicDatabase : RoomDatabase() {
     abstract fun trackDao(): TrackDao
     abstract fun playlistDao(): PlaylistDao
+    abstract fun libraryDao(): LibraryDao
 
     companion object {
         private val MIGRATION_3_4 = object : Migration(3, 4) {
@@ -68,6 +73,29 @@ abstract class MusicDatabase : RoomDatabase() {
             }
         }
 
+        /** 0.12: the library index (artists, albums). */
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `library_tracks` (
+                        `uri` TEXT NOT NULL, `source` TEXT NOT NULL, `fileUri` TEXT NOT NULL,
+                        `folderUri` TEXT NOT NULL, `folder` TEXT NOT NULL, `title` TEXT NOT NULL,
+                        `artist` TEXT NOT NULL, `album` TEXT NOT NULL, `albumArtist` TEXT NOT NULL,
+                        `genre` TEXT NOT NULL, `year` TEXT NOT NULL, `trackNumber` INTEGER NOT NULL,
+                        `discNumber` INTEGER NOT NULL, `durationMs` INTEGER NOT NULL, `hasPicture` INTEGER NOT NULL,
+                        `folderCover` TEXT NOT NULL, `fileSize` INTEGER NOT NULL, `modified` INTEGER NOT NULL,
+                        `albumKey` TEXT NOT NULL, `albumTitle` TEXT NOT NULL, `albumArtistName` TEXT NOT NULL,
+                        `artistKey` TEXT NOT NULL, `searchText` TEXT NOT NULL, PRIMARY KEY(`uri`)
+                    )
+                    """.trimIndent(),
+                )
+                for (column in listOf("albumKey", "artistKey", "source", "fileUri")) {
+                    db.execSQL("CREATE INDEX IF NOT EXISTS `index_library_tracks_$column` ON `library_tracks` (`$column`)")
+                }
+            }
+        }
+
         @Volatile
         private var INSTANCE: MusicDatabase? = null
 
@@ -78,7 +106,7 @@ abstract class MusicDatabase : RoomDatabase() {
                     MusicDatabase::class.java,
                     "musicplayer_database"
                 )
-                .addMigrations(MIGRATION_3_4, MIGRATION_4_5)
+                .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 .build()
                 INSTANCE = instance
                 instance

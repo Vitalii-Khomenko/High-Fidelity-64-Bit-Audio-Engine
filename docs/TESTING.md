@@ -43,6 +43,8 @@ FLAC with and without ReplayGain tags, MP3 CBR / VBR / VBR without Xing, a
 - CUE ranges: exact cut points, three ranges of one file join to the original
   sample for sample, invalid ranges refused.
 - Container sniffing for every signature, with an ID3v2 tag in front.
+- Duration without decoding: WAV, WavPack, TTA, APE, Opus, FLAC, Vorbis,
+  MP3 with a Xing header and CBR.
 - Tags: FLAC (comments, front vs back cover), ID3v2.3 (UTF-16, Windows-1251
   text labelled Latin-1, Latin-1, `USLT`, two `APIC`), ID3v2.4 (UTF-8, multiple
   values, frame unsynchronisation, data length indicator), whole-tag
@@ -71,7 +73,8 @@ The stubs exist only on the test include path; Android builds use real Oboe.
 
 Queue and shuffle logic (`PlaybackQueueTest`), audio focus policy, supported
 formats and sorting (including album order), CUE sheets (timing, pregaps,
-one file per track, code pages) and range URIs, the native tag record, DLNA protocol (paging, containers, XML hardening), EQ
+one file per track, code pages) and range URIs, the native tag record, library
+grouping keys and search patterns, media ids (incl. albums / artists), DLNA protocol (paging, containers, XML hardening), EQ
 settings, speed clamping, DSD labels, library folder serialisation.
 
 ## Instrumented tests
@@ -124,6 +127,7 @@ Before treating a build as stable, check:
 5. Headphones and Bluetooth: unplug (pauses), reconnect, switching outputs while playing; a call or voice message and return of focus.
 6. Screen off for 30 minutes; sleep timer; leaving and reopening the app; notification and lock-screen controls with the app closed.
 7. SAF folders, saved playlists, Books bookmarks after a restart, DLNA on your server.
+8. Library: first indexing of a large folder (progress, time), albums and artists, search in Cyrillic, covers (embedded and `cover.jpg`), adding a file and *Update library*; lock-screen and notification cover; albums with covers in Android Auto.
 
 Useful reports include the phone model, Android version, file format and rate,
 and the exact steps.

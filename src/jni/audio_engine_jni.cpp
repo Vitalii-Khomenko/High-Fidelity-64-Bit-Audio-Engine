@@ -12,6 +12,7 @@
 
 #include "../core/AudioPlayer.h"
 #include "../decoders/DecoderFactory.h"
+#include "../decoders/DurationProbe.h"
 #include "../decoders/RangeDecoder.h"
 #include "../decoders/ReplayGainScanner.h"
 #include "../tags/TagReader.h"
@@ -294,13 +295,10 @@ Java_com_aiproject_musicplayer_NativeTags_readPicture(JNIEnv* env, jclass, jint 
     return out;
 }
 
-/** Duration in ms from the engine's own decoders, 0 when the file cannot be opened. */
+/** Duration in ms from headers (no decoding; see DurationProbe.h), 0 when unknown. */
 JNIEXPORT jlong JNICALL
 Java_com_aiproject_musicplayer_NativeTags_probeDurationMs(JNIEnv*, jclass, jint fd) {
-    if (fd < 0) return 0;
-    auto decoder = dec::openDecoder(fd);
-    if (!decoder || decoder->getSampleRate() == 0) return 0;
-    return static_cast<jlong>(decoder->getTotalFrames() * 1000ull / decoder->getSampleRate());
+    return fd < 0 ? 0 : static_cast<jlong>(dec::DurationProbe(fd).durationMs());
 }
 
 } // extern "C"

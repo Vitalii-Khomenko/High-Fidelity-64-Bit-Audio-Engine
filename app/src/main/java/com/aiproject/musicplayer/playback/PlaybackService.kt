@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
@@ -35,7 +36,11 @@ import androidx.media.session.MediaButtonReceiver
 import com.aiproject.musicplayer.AudioEngine
 import com.aiproject.musicplayer.MainActivity
 import com.aiproject.musicplayer.R
+import com.aiproject.musicplayer.library.CoverArt
+import com.aiproject.musicplayer.library.CoverProvider
 import com.aiproject.musicplayer.library.DlnaPlaybackCache
+import com.aiproject.musicplayer.library.LibraryFolders
+import com.aiproject.musicplayer.library.LibraryIndex
 import com.aiproject.musicplayer.library.MediaStoreScanner
 import com.aiproject.musicplayer.library.PlaylistOrdering
 import com.aiproject.musicplayer.library.SafTreeScanner
@@ -54,6 +59,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -84,6 +90,14 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
     private lateinit var session: MediaSessionCompat
     private lateinit var audioManager: AudioManager
     private lateinit var browseTree: BrowseTree
+    private lateinit var library: LibraryIndex
+    private var libraryJob: Job? = null
+    private var libraryProgress: LibraryIndex.Progress? = null
+    private var enrichJob: Job? = null
+    private val probed = HashSet<String>()          // queue tracks already completed (or tried)
+    private var art: Bitmap? = null                 // cover of the current track
+    private var artUri: String? = null
+    private var artJob: Job? = null
     private var publishedQueue: List<Track>? = null     // what the session queue currently shows
     private var publishedWindow = 0 to 0
     private var lastError: String? = null               // shown by Android Auto until the next start
@@ -154,11 +168,17 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         setupSession()
         sessionToken = session.sessionToken   // lets Android Auto and other browsers connect
         browseTree = BrowseTree(this)
+        library = LibraryIndex(this)
         ContextCompat.registerReceiver(
             this, noisyReceiver, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY), ContextCompat.RECEIVER_NOT_EXPORTED,
         )
         restoreState()
         startMonitor()
+        // First start after an update (or a cleared index): build the library in the background.
+        scope.launch {
+            val empty = runCatching { library.count().first() == 0 }.getOrDefault(false)
+            if (empty && LibraryFolders.load(this@PlaybackService).isNotEmpty()) updateLibrary()
+        }
     }
 
     /** Media browsers (Android Auto) get the browser binder; our own UI gets [LocalBinder]. */
@@ -182,7 +202,8 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         when (val id = MediaId.parse(parentId)) {
             MediaId.Root -> result.sendResult(browseTree.rootChildren().toMutableList())
             MediaId.Queue -> result.sendResult(browseTree.queueChildren(queue.tracks, queue.currentIndex).toMutableList())
-            MediaId.Playlists, MediaId.Folders, is MediaId.Playlist, is MediaId.Folder -> {
+            MediaId.Playlists, MediaId.Folders, is MediaId.Playlist, is MediaId.Folder,
+            MediaId.Albums, MediaId.Artists, is MediaId.Album, is MediaId.Artist -> {
                 result.detach()
                 scope.launch {
                     val items = try {
@@ -192,6 +213,10 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
                                 MediaId.Folders -> browseTree.foldersChildren()
                                 is MediaId.Playlist -> browseTree.playlistChildren(id.id)
                                 is MediaId.Folder -> browseTree.folderChildren(contentResolver, id)
+                                MediaId.Albums -> browseTree.albumsChildren()
+                                MediaId.Artists -> browseTree.artistsChildren()
+                                is MediaId.Album -> browseTree.albumChildren(id.key)
+                                is MediaId.Artist -> browseTree.artistChildren(id.key)
                                 else -> emptyList()
                             }
                         }
@@ -233,8 +258,18 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
                 }.getOrDefault(emptyList())
                 if (id.index in tracks.indices) setQueue(tracks, id.index, true) else reportError(id.label)
             }
+            is MediaId.Album -> playLibrary { browseTree.albumTracks(id.key) }
+            is MediaId.AlbumTrack -> playLibrary(id.index) { browseTree.albumTracks(id.key) }
+            is MediaId.Artist -> playLibrary { browseTree.artistTracks(id.key) }
             MediaId.Queue -> play()
             else -> Unit
+        }
+    }
+
+    private fun playLibrary(index: Int = 0, load: suspend () -> List<Track>) {
+        scope.launch {
+            val tracks = runCatching { withContext(Dispatchers.IO) { load() } }.getOrDefault(emptyList())
+            if (index in tracks.indices) setQueue(tracks, index, true)
         }
     }
 
@@ -264,6 +299,11 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
             val playlist = runCatching { withContext(Dispatchers.IO) { browseTree.playlistByName(query) } }.getOrNull()
             if (playlist != null) {
                 playPlaylist(playlist.first, 0)
+                return@launch
+            }
+            val fromLibrary = runCatching { withContext(Dispatchers.IO) { browseTree.searchLibrary(query) } }.getOrDefault(emptyList())
+            if (fromLibrary.isNotEmpty()) {
+                setQueue(fromLibrary, 0, true)
                 return@launch
             }
             val folder = runCatching { withContext(Dispatchers.IO) { browseTree.matchingFolder(query) } }.getOrNull()
@@ -392,13 +432,35 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         queueChanged(saveTracks = false)
     }
 
-    /** Fills durations probed by the UI without disturbing playback. */
-    override fun updateDurations(durations: Map<String, Long>) {
-        if (durations.isEmpty()) return
-        val updated = queue.tracks.map { t -> durations[t.uri]?.let { t.copy(durationMs = it) } ?: t }
-        val order = queue.playOrder()
-        queue.restore(updated, queue.currentIndex, queue.shuffle, order)
+    /** Replaces queued tracks by URI (completed tags, durations) without disturbing playback. */
+    private fun applyTracks(updates: Map<String, Track>) {
+        if (updates.isEmpty()) return
+        val updated = queue.tracks.map { t -> updates[t.uri] ?: t }
+        queue.restore(updated, queue.currentIndex, queue.shuffle, queue.playOrder())
         queueChanged(saveTracks = true)
+        if (queue.current?.uri in updates) updateSessionMetadata()
+    }
+
+    /** Reads tags and durations of queued tracks that lack them, in small batches. */
+    private fun scheduleEnrichment() {
+        if (enrichJob?.isActive == true) return
+        val pending = queue.tracks.filter { it.uri !in probed && TrackProbe.needs(it) }
+        if (pending.isEmpty()) return
+        enrichJob = scope.launch {
+            val keepTitle = settings.contentMode == ContentMode.BOOKS
+            for (batch in pending.chunked(16)) {
+                val found = withContext(Dispatchers.IO) {
+                    batch.mapNotNull { track ->
+                        probed += track.uri
+                        runCatching { TrackProbe.complete(this@PlaybackService, library, track, keepTitle) }
+                            .getOrNull()?.let { track.uri to it }
+                    }.toMap()
+                }
+                applyTracks(found)
+            }
+            enrichJob = null
+            scheduleEnrichment()   // tracks added meanwhile
+        }
     }
 
     // ── Transport commands ───────────────────────────────────────────────────
@@ -590,6 +652,38 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         val label = getString(R.string.device)
         runImport(label, scan = { MediaStoreScanner.scan(contentResolver) }) { tracks ->
             _messages.tryEmit(getString(R.string.added_tracks, addTracks(tracks), label))
+        }
+    }
+
+    override fun updateLibrary() {
+        if (libraryJob?.isActive == true) return
+        libraryJob = scope.launch {
+            libraryProgress = LibraryIndex.Progress("", 0)
+            publish()
+            val accessible = LibraryFolders.accessibleUris(this@PlaybackService)
+            val sources = LibraryFolders.load(this@PlaybackService).filter { it.uriString in accessible }
+            try {
+                library.update(sources) { progress ->
+                    scope.launch {
+                        libraryProgress = progress
+                        publish()
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                _messages.tryEmit(getString(R.string.library_update_failed))
+            } finally {
+                libraryProgress = null
+                libraryJob = null
+                publish()
+            }
+        }
+    }
+
+    override fun forgetLibraryFolder(treeUri: String) {
+        scope.launch {
+            runCatching { library.remove(com.aiproject.musicplayer.library.LibraryFolderEntry(treeUri, "")) }
         }
     }
 
@@ -914,6 +1008,7 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         saveQueuePosition()
         publish()
         updateSessionMetadata()
+        scheduleEnrichment()
     }
 
     private fun saveQueuePosition() = store.savePosition(queue.currentIndex, queue.shuffle, queue.playOrder())
@@ -980,6 +1075,7 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
             playedUris = playedUris,
             sleepTimerEndsAt = sleepDeadline,
             importing = importing,
+            libraryUpdate = libraryProgress,
         )
         if (::browseTree.isInitialized) publishSessionQueue()
         updateSessionState()
@@ -1102,9 +1198,38 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
                 .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, track?.title.orEmpty())
                 .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, artist)
                 .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, _position.value.durationMs.coerceAtLeast(track?.durationMs ?: 0L))
+                .apply {
+                    if (track != null && art != null && artUri == track.uri) {
+                        putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, art)
+                        putString(MediaMetadataCompat.METADATA_KEY_ALBUM_ART_URI, CoverProvider.uri(this@PlaybackService, track.uri).toString())
+                    }
+                }
                 .build(),
         )
         if (isForeground || wantPlaying) updateNotification()
+        loadArt(track)
+    }
+
+    /** Loads the current track's cover for the lock screen, notification and car, then republishes. */
+    private fun loadArt(track: Track?) {
+        val uri = track?.uri
+        if (uri == artUri) return   // loaded, loading, or known to have none
+        if (uri == null || !CoverArt.isLocal(uri)) {
+            art = null
+            artUri = uri
+            return
+        }
+        artJob?.cancel()
+        artUri = uri
+        art = null
+        CoverProvider.allow(uri)
+        artJob = scope.launch {
+            val bitmap = runCatching { CoverArt.load(this@PlaybackService, uri, 512) }.getOrNull()
+            if (artUri != uri) return@launch
+            art = bitmap
+            artJob = null
+            if (bitmap != null) updateSessionMetadata()
+        }
     }
 
     // ── Notification / foreground ────────────────────────────────────────────
@@ -1128,13 +1253,14 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         val stopIntent = MediaButtonReceiver.buildMediaButtonPendingIntent(this, PlaybackStateCompat.ACTION_STOP)
         val format = engine.format()
         val subtitle = listOfNotNull(
-            track?.folder?.takeIf { it.isNotBlank() },
+            (track?.artist?.ifBlank { null } ?: track?.folder)?.takeIf { it.isNotBlank() },
             format?.let { FormatText.short(it) },
         ).joinToString("  ·  ")
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(track?.title ?: getString(R.string.app_name))
             .setContentText(subtitle)
+            .setLargeIcon(art?.takeIf { artUri == track?.uri })
             .setContentIntent(contentIntent())
             .setDeleteIntent(stopIntent)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
