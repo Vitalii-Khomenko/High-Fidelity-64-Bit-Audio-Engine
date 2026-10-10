@@ -92,11 +92,13 @@ checklist for real devices.
 
 ## Honest limits
 
-Android mixes all apps in shared mode, so the system may resample and apply its
-own volume; this player does not claim bit-perfect output. DSD is converted to
-PCM (no DoP). How real bit-perfect USB output is going to be built is in
-[docs/DIRECT_OUTPUT_PLAN.md](docs/DIRECT_OUTPUT_PLAN.md); other limits are in
-[docs/ROADMAP.md](docs/ROADMAP.md).
+By default Android mixes all apps in shared mode, so the system may resample and
+apply its own volume. On Android 14+ with a USB DAC, *Bit-perfect USB* sends the
+file's own samples at its own rate past the mixer, and the player shows whether
+the output really is bit-perfect; on older Android versions, Bluetooth and the
+phone's own outputs it is not. DSD is converted to PCM (no DoP). The rest of the
+plan (an own USB driver) is in [docs/DIRECT_OUTPUT_PLAN.md](docs/DIRECT_OUTPUT_PLAN.md);
+other limits are in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## License
 

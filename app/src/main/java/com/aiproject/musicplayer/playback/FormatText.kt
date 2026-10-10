@@ -33,7 +33,20 @@ object FormatText {
     fun output(format: StreamFormat): String {
         if (format.outputRate <= 0) return ""
         val mix = if (format.outputChannels in 1 until format.channels) " · stereo mix" else ""
-        return "Out ${rate(format.outputRate)} float$mix"
+        val sample = if (format.outputFloat) "float" else "${format.outputBits}-bit"
+        val route = if (format.outputDirect) "direct" else "mixer"
+        return "Out ${rate(format.outputRate)} $sample · $route$mix"
+    }
+
+    /** "BIT-PERFECT 96 kHz / 24-bit", "DIRECT 96 kHz / 24-bit · PROCESSED", "MIXED · SYSTEM MIXER". */
+    fun path(path: SignalPath): String {
+        val sample = if (path.float) "32-bit float" else "${path.bits}-bit"
+        return when (path.kind) {
+            SignalPath.Kind.BIT_PERFECT -> "BIT-PERFECT ${rate(path.sampleRate)} / $sample"
+            SignalPath.Kind.DIRECT_PROCESSED -> "DIRECT ${rate(path.sampleRate)} / $sample · PROCESSED"
+            // The mixer's own rate is not reported to apps.
+            SignalPath.Kind.MIXED -> "MIXED · SYSTEM MIXER"
+        }
     }
 
     fun replayGain(db: Float): String =

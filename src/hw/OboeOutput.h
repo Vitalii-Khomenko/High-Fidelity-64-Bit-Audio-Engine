@@ -6,6 +6,8 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstring>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -15,6 +17,7 @@
 #include <oboe/Oboe.h>
 
 #include "../core/RingBuffer.h"
+#include "PcmEncoder.h"
 
 #define ENGINE_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "AudioEngine", __VA_ARGS__)
 #define ENGINE_LOGI(...) __android_log_print(ANDROID_LOG_INFO, "AudioEngine", __VA_ARGS__)
@@ -35,12 +38,23 @@ namespace hw {
  * heard immediately instead of after the ~300 ms of decoded look-ahead.
  * Pausing stops consumption at an exact frame: resume continues from the same
  * sample without seeking the decoder.
+ *
+ * Direct (bit-perfect) mode: a resolver set by the app is asked before every
+ * open which format the device takes at that rate (after the app has set
+ * Android 14's bit-perfect mixer attributes). The stream is then opened at
+ * exactly that rate and format with every conversion disabled, so a mismatch
+ * fails and falls back to the shared mixer instead of resampling silently.
  */
 class OboeOutput : public oboe::AudioStreamDataCallback {
 public:
     static constexpr size_t kSpectrumSize = 4096;
     static constexpr double kRingSeconds = 0.75;
     static constexpr double kLimiterCeiling = 0.989;  // -0.1 dBFS
+    // Direct output only limits real overs: every sample a file can hold passes.
+    static constexpr double kDirectLimiterCeiling = 1.0;
+
+    /** Returns the SampleEncoding id the device takes for (rate, channels), or -1 for the shared mixer. */
+    using DirectResolver = std::function<int(uint32_t sampleRate, int channels)>;
 
     OboeOutput() : m_worker([this] { reconnectLoop(); }) {}
 
@@ -130,6 +144,36 @@ public:
         }
     }
 
+    /**
+     * Sets (or clears, with an empty function) the direct-output resolver and
+     * reopens a running stream with it, keeping the queued audio and position.
+     */
+    void setDirectResolver(DirectResolver resolver) {
+        {
+            std::lock_guard<std::mutex> lock(m_streamMutex);
+            m_resolver = std::move(resolver);
+        }
+        requestReopen();
+    }
+
+    /**
+     * Closes the stream and lets the worker open it again (resolver asked
+     * anew, ring kept). For output-device changes and mode switches.
+     */
+    void requestReopen() {
+        {
+            std::lock_guard<std::mutex> lock(m_streamMutex);
+            if (!m_configured || !m_stream) return;
+            closeStreamLocked();
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_signal->mutex);
+            if (!m_signal->alive) return;
+            m_signal->pending = true;
+        }
+        m_signal->cv.notify_one();
+    }
+
     /** Lock-free: queries from the UI must not wait for a stream being opened. */
     bool isConfigured() const { return m_configured.load(std::memory_order_acquire); }
     bool isRunRequested() const { return m_runRequested.load(std::memory_order_acquire); }
@@ -137,6 +181,15 @@ public:
     bool hasFailed() const { return m_failed.load(std::memory_order_acquire); }
     uint32_t sampleRate() const { return m_sampleRate.load(std::memory_order_acquire); }
     int channels() const { return m_channels.load(std::memory_order_acquire); }
+    /** True while the stream runs in direct (bit-perfect) mode. */
+    bool isDirect() const { return m_direct.load(std::memory_order_acquire); }
+    SampleEncoding encoding() const { return m_encoding.load(std::memory_order_acquire); }
+    /**
+     * Samples written since creation that differ from what the engine
+     * produced before quantisation, i.e. were processed (gain, EQ, ...) and
+     * dithered. Fades on start/pause are not counted.
+     */
+    uint64_t inexactSamples() const { return m_inexact.load(std::memory_order_relaxed); }
 
     // ── Decode-thread side ───────────────────────────────────────────────────
 
@@ -190,13 +243,15 @@ public:
     // ── Real-time callback ───────────────────────────────────────────────────
 
     oboe::DataCallbackResult onAudioReady(oboe::AudioStream*, void* audioData, int32_t numFrames) override {
-        float* out = static_cast<float*>(audioData);
+        uint8_t* out = static_cast<uint8_t*>(audioData);
         const size_t ch = static_cast<size_t>(m_channels.load(std::memory_order_relaxed));
+        const SampleEncoding enc = m_encoding.load(std::memory_order_relaxed);
+        const size_t frameBytes = ch * bytesPerSample(enc);
         const size_t total = static_cast<size_t>(std::max<int32_t>(numFrames, 0));
         const bool run = m_runRequested.load(std::memory_order_acquire);
 
         if ((!run && m_fade <= 0.0) || !m_ring) {
-            std::fill(out, out + total * ch, 0.0f);
+            std::memset(out, 0, total * frameBytes);
             m_idle.store(true, std::memory_order_release);
             m_silentCallbacks.fetch_add(1, std::memory_order_acq_rel);
             return oboe::DataCallbackResult::Continue;
@@ -219,8 +274,10 @@ public:
             const size_t got = m_ring->read(m_scratch.data(), want * ch) / ch;
             if (got > 0) m_consumedFrames.fetch_add(got, std::memory_order_acq_rel);
 
+            bool fading = false;
             for (size_t f = 0; f < got; ++f) {
                 m_fade = run ? std::min(1.0, m_fade + m_fadeInStep) : std::max(0.0, m_fade - fadeOutStep);
+                fading |= m_fade < 1.0;
                 // Linear ramp: a full-scale volume change takes 30 ms and lands exactly.
                 const double diff = targetGain - m_gain;
                 m_gain = std::fabs(diff) <= m_gainStep ? targetGain : m_gain + std::copysign(m_gainStep, diff);
@@ -231,21 +288,25 @@ public:
                 for (size_t c = 0; c < ch; ++c) {
                     if (!std::isfinite(s[c])) s[c] = 0.0;  // last line of defence for the device
                     mono += s[c];
-                    s[c] *= g;
+                    if (g != 1.0) s[c] *= g;
                     peak = std::max(peak, std::fabs(s[c]));
                 }
                 m_spectrum[specPos & (kSpectrumSize - 1)].store(
                     static_cast<float>(mono * m_fade / static_cast<double>(ch)), std::memory_order_relaxed);
                 ++specPos;
                 // Peak limiter: instant attack, smooth release. Inactive below the ceiling.
-                if (peak * m_limiterGain > kLimiterCeiling) m_limiterGain = kLimiterCeiling / peak;
+                if (peak * m_limiterGain > m_ceiling) m_limiterGain = m_ceiling / peak;
                 else m_limiterGain += (1.0 - m_limiterGain) * m_limiterRelease;
-                float* o = out + (frame + f) * ch;
-                for (size_t c = 0; c < ch; ++c) {
-                    const float v = static_cast<float>(s[c] * m_limiterGain);
-                    o[c] = v;
-                    m_lastOut[c] = v;
+                if (m_limiterGain != 1.0) {
+                    // The release approaches 1 asymptotically: snap once inaudible.
+                    if (m_limiterGain > 1.0 - 1e-9) m_limiterGain = 1.0;
+                    for (size_t c = 0; c < ch; ++c) s[c] *= m_limiterGain;
                 }
+            }
+            if (got > 0) {
+                std::copy(m_scratch.data() + (got - 1) * ch, m_scratch.data() + got * ch, m_lastOut.begin());
+                const size_t inexact = m_encoder.encode(m_scratch.data(), got * ch, out + frame * frameBytes, enc);
+                if (!fading && inexact > 0) m_inexact.fetch_add(inexact, std::memory_order_relaxed);
             }
             frame += got;
 
@@ -257,15 +318,16 @@ public:
                 m_underruns.fetch_add(1, std::memory_order_relaxed);
                 const size_t ramp = std::min<size_t>(total - frame, 32);
                 for (size_t f = 0; f < ramp; ++f) {
-                    const float k = static_cast<float>(ramp - f - 1) / static_cast<float>(ramp);
-                    for (size_t c = 0; c < ch; ++c) out[(frame + f) * ch + c] = m_lastOut[c] * k;
+                    const double k = static_cast<double>(ramp - f - 1) / static_cast<double>(ramp);
+                    for (size_t c = 0; c < ch; ++c) m_scratch[f * ch + c] = m_lastOut[c] * k;
                 }
+                m_encoder.encode(m_scratch.data(), ramp * ch, out + frame * frameBytes, enc);
                 frame += ramp;
-                std::fill(m_lastOut.begin(), m_lastOut.end(), 0.0f);
+                std::fill(m_lastOut.begin(), m_lastOut.end(), 0.0);
                 break;
             }
         }
-        if (frame < total) std::fill(out + frame * ch, out + total * ch, 0.0f);
+        if (frame < total) std::memset(out + frame * frameBytes, 0, (total - frame) * frameBytes);
         m_spectrumPos.store(specPos, std::memory_order_release);
         return oboe::DataCallbackResult::Continue;
     }
@@ -299,38 +361,69 @@ private:
         std::shared_ptr<ReconnectSignal> m_signal;
     };
 
-    bool openLocked(int channels) {
-        closeStreamLocked();
+    static oboe::AudioFormat oboeFormat(SampleEncoding e) {
+        switch (e) {
+            case SampleEncoding::I16: return oboe::AudioFormat::I16;
+            case SampleEncoding::I24: return oboe::AudioFormat::I24;
+            case SampleEncoding::I32: return oboe::AudioFormat::I32;
+            default: return oboe::AudioFormat::Float;
+        }
+    }
+
+    /** Opens one stream; direct = exact rate and format with every conversion disabled. */
+    std::shared_ptr<oboe::AudioStream> openStream(int channels, bool direct, SampleEncoding encoding) {
         oboe::AudioStreamBuilder builder;
         builder.setDirection(oboe::Direction::Output)
             ->setPerformanceMode(oboe::PerformanceMode::None)
             ->setSharingMode(oboe::SharingMode::Shared)
             ->setUsage(oboe::Usage::Media)
             ->setContentType(oboe::ContentType::Music)
-            ->setFormat(oboe::AudioFormat::Float)
-            ->setFormatConversionAllowed(true)
+            ->setFormat(oboeFormat(encoding))
+            ->setFormatConversionAllowed(!direct)
             ->setChannelCount(channels)
-            ->setChannelConversionAllowed(true)
+            ->setChannelConversionAllowed(!direct)
             ->setSampleRate(static_cast<int32_t>(sampleRate()))
-            ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::High)
+            ->setSampleRateConversionQuality(direct ? oboe::SampleRateConversionQuality::None
+                                                    : oboe::SampleRateConversionQuality::High)
             ->setDataCallback(this)
             ->setErrorCallback(std::make_shared<ErrorCallback>(m_signal));
 
         std::shared_ptr<oboe::AudioStream> stream;
         const oboe::Result result = builder.openStream(stream);
         if (result != oboe::Result::OK || !stream) {
-            ENGINE_LOGE("Oboe openStream(%u Hz, %d ch) failed: %s",
-                        sampleRate(), channels, oboe::convertToText(result));
-            return false;
+            ENGINE_LOGE("Oboe openStream(%u Hz, %d ch, direct %d) failed: %s",
+                        sampleRate(), channels, direct ? 1 : 0, oboe::convertToText(result));
+            return nullptr;
         }
         if (stream->getSampleRate() != static_cast<int32_t>(sampleRate()) ||
             stream->getChannelCount() != channels ||
-            stream->getFormat() != oboe::AudioFormat::Float) {
+            stream->getFormat() != oboeFormat(encoding)) {
             ENGINE_LOGE("Oboe returned an unexpected format (%d Hz, %d ch)",
                         stream->getSampleRate(), stream->getChannelCount());
             stream->close();
-            return false;
+            return nullptr;
         }
+        return stream;
+    }
+
+    bool openLocked(int channels) {
+        closeStreamLocked();
+        // The app sets the device's mixer attributes in the resolver, before the open.
+        const int requested = m_resolver ? m_resolver(sampleRate(), channels) : -1;
+        bool direct = requested >= static_cast<int>(SampleEncoding::Float) &&
+                      requested <= static_cast<int>(SampleEncoding::I32);
+        SampleEncoding encoding = direct ? static_cast<SampleEncoding>(requested) : SampleEncoding::Float;
+        std::shared_ptr<oboe::AudioStream> stream = openStream(channels, direct, encoding);
+        if (!stream && direct) {
+            ENGINE_LOGI("Direct output refused at %u Hz; using the shared mixer", sampleRate());
+            direct = false;
+            encoding = SampleEncoding::Float;
+            stream = openStream(channels, false, encoding);
+        }
+        if (!stream) return false;
+        m_direct.store(direct, std::memory_order_release);
+        m_encoding.store(encoding, std::memory_order_release);
+        m_ceiling = direct ? kDirectLimiterCeiling : kLimiterCeiling;
         if (channels != this->channels() || !m_ring) {
             // No stream is running here, so callback-side state may change.
             // A reconnect with the same layout keeps the queued audio.
@@ -341,7 +434,7 @@ private:
             m_writtenFrames.store(m_consumedFrames.load(std::memory_order_acquire), std::memory_order_release);
         }
         m_scratch.assign(kChunkFrames * static_cast<size_t>(channels), 0.0);
-        m_lastOut.assign(static_cast<size_t>(channels), 0.0f);
+        m_lastOut.assign(static_cast<size_t>(channels), 0.0);
         const double sr = static_cast<double>(sampleRate());
         m_gainStep = 1.0 / std::max(1.0, 0.03 * sr);
         m_limiterRelease = 1.0 - std::exp(-1.0 / (0.15 * sr));
@@ -353,7 +446,8 @@ private:
         m_stream = std::move(stream);
         m_started = false;
         m_failed.store(false, std::memory_order_release);
-        ENGINE_LOGI("Oboe stream opened: %u Hz, %d ch", sampleRate(), channels);
+        ENGINE_LOGI("Oboe stream opened: %u Hz, %d ch, %d-bit%s", sampleRate(), channels,
+                    bitsPerSample(encoding), direct ? ", direct" : "");
         return true;
     }
 
@@ -369,6 +463,7 @@ private:
     void closeLocked() {
         closeStreamLocked();
         m_ring.reset();
+        m_direct.store(false, std::memory_order_release);
         m_channels.store(0, std::memory_order_release);
         m_capacityFrames = 0;
     }
@@ -424,6 +519,7 @@ private:
     std::shared_ptr<oboe::AudioStream> m_stream;
     std::atomic<bool> m_configured{false};
     bool m_started = false;
+    DirectResolver m_resolver;
     // Written under m_streamMutex while no stream runs; read from any thread.
     std::atomic<uint32_t> m_sampleRate{48000};
     std::atomic<int> m_channels{0};
@@ -432,7 +528,9 @@ private:
     // Shared with the callback. Changed only while no stream is open.
     std::unique_ptr<core::RingBuffer<double>> m_ring;
     std::vector<double> m_scratch;
-    std::vector<float> m_lastOut;
+    std::vector<double> m_lastOut;
+    PcmEncoder m_encoder;
+    double m_ceiling = kLimiterCeiling;
     double m_gainStep = 0.001;
     double m_limiterRelease = 0.0001;
     double m_fadeInStep = 0.001;
@@ -443,6 +541,9 @@ private:
     double m_limiterGain = 1.0;
 
     std::atomic<bool> m_failed{false};
+    std::atomic<bool> m_direct{false};
+    std::atomic<SampleEncoding> m_encoding{SampleEncoding::Float};
+    std::atomic<uint64_t> m_inexact{0};
     std::atomic<bool> m_runRequested{false};
     std::atomic<bool> m_idle{true};
     std::atomic<int> m_silentCallbacks{0};

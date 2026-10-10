@@ -44,6 +44,7 @@ import com.aiproject.musicplayer.db.MusicDatabase
 import com.aiproject.musicplayer.db.PlaylistStore
 import com.aiproject.musicplayer.playback.ContentMode
 import com.aiproject.musicplayer.playback.FormatText
+import com.aiproject.musicplayer.playback.SignalPath
 import com.aiproject.musicplayer.playback.PlaybackPosition
 import com.aiproject.musicplayer.playback.PlayerCommands
 import com.aiproject.musicplayer.playback.PlayerState
@@ -240,7 +241,17 @@ private fun NowPlaying(state: PlayerState, position: PlaybackPosition, commands:
                     ToneChip(chip, if (chip.startsWith("DSD")) aw.amber else aw.cyan)
                 }
                 FormatText.replayGain(format.replayGainDb).takeIf { it.isNotEmpty() }?.let { ToneChip(it, aw.violet) }
-                FormatText.output(format).takeIf { it.isNotEmpty() }?.let { ToneChip(it, aw.muted) }
+                val path = state.signalPath
+                if (path != null) {
+                    val tone = when (path.kind) {
+                        SignalPath.Kind.BIT_PERFECT -> aw.cyan
+                        SignalPath.Kind.DIRECT_PROCESSED -> aw.amber
+                        SignalPath.Kind.MIXED -> aw.muted
+                    }
+                    ToneChip(FormatText.path(path), tone)
+                } else {
+                    FormatText.output(format).takeIf { it.isNotEmpty() }?.let { ToneChip(it, aw.muted) }
+                }
             }
             if (state.settings.speed != 1f) ToneChip("%.2f×".format(state.settings.speed), aw.amber)
         }

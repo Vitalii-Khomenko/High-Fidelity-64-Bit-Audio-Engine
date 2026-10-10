@@ -68,6 +68,7 @@ std::vector<float> takeCapture() {
 void startCapture() {
     std::lock_guard<std::mutex> lock(oboe::captureMutex);
     oboe::captured.clear();
+    oboe::capturedRaw.clear();
     oboe::capture = true;
 }
 
@@ -670,6 +671,155 @@ void testDestroyWhilePlaying() {
 
 } // namespace
 
+// ── Direct (bit-perfect) output ──────────────────────────────────────────────
+
+/**
+ * 16-bit stereo source whose samples encode the frame number, kept below the
+ * true-peak limiter's ceiling: L(n) = n % 20000 + 1, R(n) = -(n % 7919) - 1.
+ */
+class CounterDecoder : public ToneDecoder {
+public:
+    CounterDecoder(uint64_t frames, uint32_t rate) : ToneDecoder(frames, rate, 2), m_total(frames) {}
+    size_t readFrames(core::AudioBuffer& b, size_t n) override {
+        n = static_cast<size_t>(std::min<uint64_t>({n, b.getNumFrames(), m_total - m_pos}));
+        for (size_t f = 0; f < n; ++f) {
+            b.getWritePointer(0)[f] = left(m_pos + f) / 32768.0;
+            b.getWritePointer(1)[f] = right(m_pos + f) / 32768.0;
+        }
+        m_pos += n;
+        return n;
+    }
+    bool seekToFrame(uint64_t f) override { m_pos = std::min(f, m_total); return true; }
+    uint64_t getCurrentFrame() const override { return m_pos; }
+    static int left(uint64_t n) { return static_cast<int>(n % 20000) + 1; }
+    static int right(uint64_t n) { return -static_cast<int>(n % 7919) - 1; }
+private:
+    uint64_t m_total, m_pos = 0;
+};
+
+std::vector<int32_t> takeRaw24() {
+    std::lock_guard<std::mutex> lock(oboe::captureMutex);
+    std::vector<int32_t> out(oboe::capturedRaw.size() / 3);
+    for (size_t i = 0; i < out.size(); ++i) {
+        const uint8_t* b = &oboe::capturedRaw[i * 3];
+        out[i] = static_cast<int32_t>(static_cast<uint32_t>(b[0]) << 8 | static_cast<uint32_t>(b[1]) << 16 |
+                                      static_cast<uint32_t>(b[2]) << 24) >> 8;
+    }
+    oboe::capturedRaw.clear();
+    return out;
+}
+
+/**
+ * Counts output frames (24-bit) that carry source frame n exactly, scaled by
+ * gainNum/gainDen, in one unbroken run after the fade-in. Returns the run length.
+ */
+size_t exactRun(const std::vector<int32_t>& out, uint64_t total, int gainNum = 1, int gainDen = 1) {
+    size_t run = 0;
+    int64_t expect = -1;
+    for (size_t i = 0; i + 1 < out.size(); i += 2) {
+        const auto scaled = [&](int v) { return int64_t{v} * 256 * gainNum; };
+        if (expect < 0) {
+            // The first frame after the fade-in (frames 0..999 of the source).
+            const int64_t l = out[i];
+            if (l * gainDen % (256 * gainNum) != 0) continue;
+            const int64_t n = l * gainDen / (256 * gainNum) - 1;
+            if (n < 1000 || n >= 20000) continue;
+            expect = n;
+        }
+        if (out[i] * gainDen != scaled(CounterDecoder::left(expect)) ||
+            out[i + 1] * gainDen != scaled(CounterDecoder::right(expect))) break;
+        ++run;
+        if (static_cast<uint64_t>(++expect) == total) break;
+    }
+    return run;
+}
+
+void testDirectOutputIsBitExact() {
+    std::vector<std::pair<uint32_t, int>> asked;
+    std::mutex askedMutex;
+    core::AudioPlayer p;
+    p.setDirectOutput([&](uint32_t rate, int channels) {
+        std::lock_guard<std::mutex> lock(askedMutex);
+        asked.emplace_back(rate, channels);
+        return static_cast<int>(hw::SampleEncoding::I24);
+    });
+    const uint64_t total = 44100;
+    CHECK(p.load(std::make_unique<CounterDecoder>(total, 44100), 1.0));
+    CHECK(p.isDirectOutput());
+    CHECK(p.outputBits() == 24 && !p.outputIsFloat());
+    CHECK(p.outputSampleRate() == 44100);
+    {
+        std::lock_guard<std::mutex> lock(askedMutex);
+        CHECK(!asked.empty() && asked.back() == std::make_pair(44100u, 2));
+    }
+    startCapture();
+    CHECK(p.play());
+    CHECK(waitFor([&] { return p.state() == PlayerState::Ended; }));
+    oboe::capture = false;
+    // Everything after the 12 ms fade-in arrives sample for sample, 16 → 24 bit.
+    CHECK(exactRun(takeRaw24(), total) == total - 1000);
+    CHECK(p.inexactOutputSamples() == 0);
+}
+
+void testDirectOutputVolume() {
+    core::AudioPlayer p;
+    p.setDirectOutput([](uint32_t, int) { return static_cast<int>(hw::SampleEncoding::I24); });
+    const uint64_t total = 48000;
+    CHECK(p.load(std::make_unique<CounterDecoder>(total, 48000), 1.0));
+    p.setVolume(0.5);  // -6.02 dB: still exact in 24 bit, no dither
+    startCapture();
+    CHECK(p.play());
+    CHECK(waitFor([&] { return p.state() == PlayerState::Ended; }));
+    oboe::capture = false;
+    CHECK(exactRun(takeRaw24(), total, 1, 2) == total - 1000);
+    CHECK(p.inexactOutputSamples() == 0);
+    // A volume that needs rounding is dithered and reported as processed.
+    CHECK(p.load(std::make_unique<CounterDecoder>(total, 48000), 1.0));
+    p.setVolume(0.3);
+    CHECK(p.play());
+    CHECK(waitFor([&] { return p.state() == PlayerState::Ended; }));
+    CHECK(p.inexactOutputSamples() > total);
+}
+
+void testDirectOutputRefusedFallsBack() {
+    oboe::refuseDirect = true;
+    core::AudioPlayer p;
+    p.setDirectOutput([](uint32_t, int) { return static_cast<int>(hw::SampleEncoding::I32); });
+    CHECK(p.load(std::make_unique<ToneDecoder>(4800), 1.0));
+    oboe::refuseDirect = false;
+    CHECK(!p.isDirectOutput());
+    CHECK(p.outputIsFloat() && p.outputBits() == 32);
+    CHECK(p.play());
+    CHECK(waitFor([&] { return p.state() == PlayerState::Ended; }));
+}
+
+void testDirectOutputFollowsFormatAndSwitch() {
+    std::atomic<uint32_t> lastRate{0};
+    std::atomic<bool> direct{true};
+    core::AudioPlayer p;
+    p.setDirectOutput([&](uint32_t rate, int) {
+        lastRate = rate;
+        return direct ? static_cast<int>(hw::SampleEncoding::I16) : -1;
+    });
+    CHECK(p.load(std::make_unique<ToneDecoder>(24000, 48000), 1.0));
+    CHECK(lastRate == 48000 && p.outputBits() == 16);
+    // The next track at another rate asks the app again before its stream opens.
+    p.setNext(std::make_unique<ToneDecoder>(96000 * 3 / 2, 96000), 1.0);
+    CHECK(p.play());
+    CHECK(waitFor([&] { return p.consumeTrackAdvanced(); }));
+    CHECK(lastRate == 96000 && p.isDirectOutput() && p.outputSampleRate() == 96000);
+    // Leaving direct mode while playing reopens without losing the place.
+    CHECK(waitFor([&] { return p.positionMs() > 300.0; }));
+    const int opens = oboe::openCount;
+    direct = false;
+    p.reopenOutput();
+    CHECK(waitFor([&] { return oboe::openCount > opens; }));
+    CHECK(waitFor([&] { return !p.isDirectOutput() && p.outputIsFloat(); }));
+    CHECK(waitFor([&] { return p.state() == PlayerState::Ended; }));
+    CHECK_NEAR(p.positionMs(), 1500.0, 0.5);
+    p.setDirectOutput(nullptr);  // stopped: nothing to reopen
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     testPlaysToEnd();
@@ -698,8 +848,13 @@ int main() {
     testConcurrentControl();
     testPlayDuringGaplessSwitch();
     testDestroyWhilePlaying();
+    testDirectOutputIsBitExact();
+    testDirectOutputVolume();
+    testDirectOutputRefusedFallsBack();
+    testDirectOutputFollowsFormatAndSwitch();
     std::puts("Player tests passed: end/drain, sample-exact pause/resume, immediate volume, seek, gapless, "
               "seek/clear during gapless look-ahead, format change, downmix fallback, output failure, reconnect, "
-              "failed restart, limiter+EQ, speed, spectrum, concurrency, audit A01-A04/A07/A08 regressions.");
+              "failed restart, limiter+EQ, speed, spectrum, concurrency, direct output (bit-exact 16→24, exact volume, "
+              "fallback, format change, mode switch), audit A01-A04/A07/A08 regressions.");
     return 0;
 }

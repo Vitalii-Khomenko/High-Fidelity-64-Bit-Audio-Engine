@@ -77,7 +77,15 @@ reconnect whose restart keeps failing, limiter ceiling with EQ boost, switching 
 playing and across a gapless boundary (every frame exactly once), DLNA
 streaming (a pause during a download stall resumes without a lost or repeated
 frame; a failed download ends the track instead of hanging), time-stretch timing, spectrum, concurrent control
-from several threads and destruction while playing.
+from several threads and destruction while playing. Direct output: a 16-bit
+source arrives in 24-bit sample for sample, a −6.02 dB volume stays exact
+without dither while 0.3 is dithered and reported, a refused format falls back
+to the float mixer stream, the app is asked again on a rate change across
+tracks, and leaving direct mode while playing keeps the position.
+
+`dsp_tests.cpp` also checks the device PCM encoder: exact 16/24/32-bit and
+float values pass unchanged, overs clamp, and a quarter-LSB signal keeps its
+mean under TPDF dither.
 
 The stubs exist only on the test include path; Android builds use real Oboe.
 
@@ -150,6 +158,7 @@ Before treating a build as stable, check:
 10. DLNA: a large FLAC from your server starts before it has downloaded; the renderer with BubbleUPnP (or Windows "Cast to device"): play, pause, seek, volume, next track gapless.
 9. Sound: an AutoEQ profile for your headphones (search, apply, switch back to 5 bands), crossfeed presets with headphones, *Measure library* on a few albums without tags and their level against tagged ones, the limiter with EQ boosts.
 8. Library: first indexing of a large folder (progress, time), albums and artists, search in Cyrillic, covers (embedded and `cover.jpg`), adding a file and *Update library*; lock-screen and notification cover; albums with covers in Android Auto.
+12. Bit-perfect USB (Android 14+, a DAC that shows its input rate): turn it on, play 44.1 / 48 / 88.2 / 96 / 192 kHz files and check the DAC display and the *BIT-PERFECT* chip; volume keys change the level; volume below 100 % or EQ shows *PROCESSED*; plug the DAC in and out while playing; turn the setting off while playing (back to *MIXED*, other apps audible again).
 
 Useful reports include the phone model, Android version, file format and rate,
 and the exact steps.

@@ -17,6 +17,9 @@ interface PlayerCommands {
     fun setReplayGain(mode: ReplayGainMode)
     fun setCrossfeed(mode: CrossfeedMode)
     fun setLimiter(enabled: Boolean)
+
+    /** Bit-perfect output to a USB DAC through Android 14's mixer attributes. */
+    fun setBitPerfect(enabled: Boolean)
     fun setAutoAnalyze(enabled: Boolean)
 
     /** Measures every library track without ReplayGain tags (EBU R128), in the background. */

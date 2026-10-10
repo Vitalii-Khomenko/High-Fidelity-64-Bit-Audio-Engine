@@ -19,6 +19,12 @@ data class StreamFormat(
     val outputChannels: Int,
     val replayGainDb: Float,
     val underruns: Int,
+    /** The device stream bypasses the system mixer (bit-perfect mixer attributes). */
+    val outputDirect: Boolean = false,
+    val outputBits: Int = 32,
+    val outputFloat: Boolean = true,
+    /** Wrapping count of output samples the engine had to round (processed); compare successive values. */
+    val processedSamples: Int = 0,
 ) {
     /** Same order as decoders::Codec in src/decoders/IAudioDecoder.h. */
     enum class Codec(val label: String, val lossy: Boolean = false) {
@@ -26,6 +32,16 @@ data class StreamFormat(
         AAC("AAC", true), ALAC("ALAC"), VORBIS("VORBIS", true), OPUS("OPUS", true), WAVPACK("WAVPACK"),
         APE("APE"), TTA("TTA"), OTHER(""),
     }
+}
+
+/**
+ * Asked by the engine before it opens a device stream (on an engine thread,
+ * with the output locked: never call back into the engine). Returns the
+ * OutputEncoding id the stream must use for bit-perfect output, or -1 for the
+ * shared mixer. The native side calls [encodingFor] by name.
+ */
+fun interface DirectOutputPolicy {
+    fun encodingFor(sampleRate: Int, channels: Int): Int
 }
 
 /**
@@ -102,6 +118,12 @@ class AudioEngine {
     fun setCrossfeed(mode: CrossfeedMode) = nativeSetCrossfeed(id, mode.id)
     fun setLimiter(enabled: Boolean) = nativeSetLimiter(id, enabled)
 
+    /** Direct output policy (null: shared mixer only). Reopens a running stream with it. */
+    fun setDirectOutput(policy: DirectOutputPolicy?) = nativeSetDirectOutput(id, policy)
+
+    /** Reopens the device stream, asking the policy again, without losing the position. */
+    fun reopenOutput() = nativeReopenOutput(id)
+
     fun state(): State = State.entries.getOrElse(nativeGetState(id)) { State.ERROR }
     fun positionMs(): Long = nativeGetPositionMs(id).toLong()
     fun durationMs(): Long = nativeGetDurationMs(id).toLong()
@@ -110,7 +132,7 @@ class AudioEngine {
     fun consumeTrackAdvanced(): Boolean = nativeConsumeTrackAdvanced(id)
 
     fun format(): StreamFormat? {
-        val v = IntArray(10)
+        val v = IntArray(14)
         nativeGetTrackInfo(id, v)
         if (v[0] == 0) return null
         return StreamFormat(
@@ -123,6 +145,10 @@ class AudioEngine {
             outputChannels = v[6],
             replayGainDb = v[7] / 100f,
             underruns = v[9],
+            outputDirect = v[10] != 0,
+            outputBits = v[11],
+            outputFloat = v[12] != 0,
+            processedSamples = v[13],
         )
     }
 
@@ -150,6 +176,8 @@ class AudioEngine {
     private external fun nativeSetEq(id: Long, enabled: Boolean, preampDb: Double, bands: DoubleArray)
     private external fun nativeSetCrossfeed(id: Long, preset: Int)
     private external fun nativeSetLimiter(id: Long, enabled: Boolean)
+    private external fun nativeSetDirectOutput(id: Long, policy: DirectOutputPolicy?)
+    private external fun nativeReopenOutput(id: Long)
     private external fun nativeGetState(id: Long): Int
     private external fun nativeGetPositionMs(id: Long): Double
     private external fun nativeGetDurationMs(id: Long): Double

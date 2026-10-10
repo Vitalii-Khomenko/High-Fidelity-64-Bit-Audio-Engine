@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.16.0 — 2026-10-10
+
+### Bit-perfect USB output (phase 1 of docs/DIRECT_OUTPUT_PLAN.md)
+
+- **Settings → Signal path → Bit-perfect USB** (Android 14+): with a USB DAC that offers bit-perfect formats, every track's stream opens at the file's own rate past Android's mixer (`setPreferredMixerAttributes` with `MIXER_BEHAVIOR_BIT_PERFECT`). The best format the DAC offers at that rate is used (32-bit, 24-bit, float, 16-bit). Rates the DAC does not offer, and phones that refuse, fall back to the mixer. Oboe's own conversions are disabled on this path, so a mismatch can never resample silently.
+- **Integer output with dither**: the engine writes 16, 24 or 32-bit integers itself. Samples the format holds exactly pass unchanged (an untouched 16-bit file reaches a 24-bit DAC bit for bit; silence stays digital silence); only rounded samples get TPDF dither.
+- **Honest indicator** on the player and in Settings: `BIT-PERFECT 96 kHz / 24-bit`, `DIRECT … · PROCESSED` (volume below 100 %, EQ, ReplayGain, crossfeed, speed, DSD, downmix, or the engine rounding samples, e.g. the limiter catching a peak), or `MIXED · SYSTEM MIXER`.
+- On the direct path the system volume does nothing, so the volume keys drive the engine volume (remote volume on the media session). The output limiter only acts on real overs there (full scale instead of −0.1 dBFS).
+- Plugging in or removing a DAC while playing, and switching the setting, reopen the stream without losing the position or queued audio.
+- Native tests: bit-exact 16 → 24-bit output, exact −6 dB volume without dither, dither statistics, fallback, rate change across tracks, mode switch while playing. JVM tests for the format choice and the indicator rules.
+
 ## 0.15.0 — 2026-10-09
 
 - **Lyrics**: a *Lyrics* panel on the player. Synced LRC (several time tags per line, `[offset:]`, word timings) follows the position and highlights the current line; plain lyrics scroll. Taken from `<name>.lrc` next to the file, else from the tags (`USLT`, `LYRICS`, `©lyr`); UTF-8 and Windows-1251 files.

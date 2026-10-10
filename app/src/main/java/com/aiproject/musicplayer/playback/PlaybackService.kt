@@ -11,6 +11,8 @@ import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.media.AudioAttributes
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.net.Uri
@@ -32,6 +34,7 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import androidx.media.app.NotificationCompat.MediaStyle
 import androidx.media.MediaBrowserServiceCompat
+import androidx.media.VolumeProviderCompat
 import androidx.media.session.MediaButtonReceiver
 import com.aiproject.musicplayer.AudioEngine
 import com.aiproject.musicplayer.MainActivity
@@ -70,6 +73,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
+import kotlin.math.roundToInt
 
 /**
  * Owns playback: the native engine, the queue, audio focus, the media session
@@ -157,6 +161,19 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
     private var sleepDeadline = 0L
     private var sleepFactor = 1.0
     private var duckFactor = 1.0
+
+    // Bit-perfect USB output (Android 14+); null on older versions.
+    private var bitPerfect: BitPerfectOutput? = null
+    private var bitPerfectAvailable = false
+    private var signalPath: SignalPath? = null
+    private var lastProcessedCount = 0
+    private var processedAt = Long.MIN_VALUE / 2
+    // While the output is direct the system volume does nothing: the keys drive the engine volume.
+    private var remoteVolume: VolumeProviderCompat? = null
+    private val usbCallback = object : AudioDeviceCallback() {
+        override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>) = onUsbChanged(added)
+        override fun onAudioDevicesRemoved(removed: Array<out AudioDeviceInfo>) = onUsbChanged(removed)
+    }
     private var consecutiveFailures = 0
     private var pendingTransport = 0             // engine calls queued but not yet run
     private var isForeground = false
@@ -198,6 +215,7 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
             this, noisyReceiver, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY), ContextCompat.RECEIVER_NOT_EXPORTED,
         )
         restoreState()
+        setupBitPerfect()
         startMonitor()
         if (settings.renderer) startRenderer()
         // First start after an update (or a cleared index): build the library in the background.
@@ -388,6 +406,11 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         saveResumePoint()
         scope.cancel()
         try { unregisterReceiver(noisyReceiver) } catch (_: Exception) {}
+        bitPerfect?.let { output ->
+            audioManager.unregisterAudioDeviceCallback(usbCallback)
+            output.enabled = false
+            output.release()   // hand the DAC back to the system mixer
+        }
         abandonFocus()
         session.isActive = false
         session.release()
@@ -599,6 +622,7 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
     override fun setVolume(volume: Float) {
         updateSettings(settings.copy(volume = volume.coerceIn(0f, 1f)))
         applyVolume()
+        remoteVolume?.currentVolume = volumePercent()
     }
 
     override fun setSpeed(speed: Float) {
@@ -635,6 +659,70 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         updateSettings(settings.copy(limiter = enabled))
         engine.setLimiter(enabled)
     }
+
+    override fun setBitPerfect(enabled: Boolean) {
+        updateSettings(settings.copy(bitPerfect = enabled))
+        val output = bitPerfect ?: return
+        output.enabled = enabled
+        engineExecutor.execute {
+            engine.reopenOutput()
+            if (!enabled) output.release()   // also when no stream was open
+        }
+    }
+
+    // ── Bit-perfect USB output ───────────────────────────────────────────────
+
+    private fun setupBitPerfect() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
+        val output = BitPerfectOutput(audioManager).also { it.enabled = settings.bitPerfect }
+        bitPerfect = output
+        bitPerfectAvailable = output.capableDevice() != null
+        engineExecutor.execute { engine.setDirectOutput(output) }
+        audioManager.registerAudioDeviceCallback(usbCallback, null)
+    }
+
+    private fun onUsbChanged(devices: Array<out AudioDeviceInfo>) {
+        val output = bitPerfect ?: return
+        if (devices.none { it.type == AudioDeviceInfo.TYPE_USB_DEVICE || it.type == AudioDeviceInfo.TYPE_USB_HEADSET }) return
+        bitPerfectAvailable = output.capableDevice() != null
+        // A DAC plugged in while playing: reopen so the stream goes direct (or back to the mixer).
+        if (settings.bitPerfect) engineExecutor.execute { engine.reopenOutput() }
+        publish()
+    }
+
+    /** Re-evaluates what reaches the device; publishes only on a change. */
+    private fun updateSignalPath() {
+        val format = if (loadedUri != null) engine.format() else null
+        val now = SystemClock.elapsedRealtime()
+        if (format != null && format.processedSamples != lastProcessedCount) {
+            lastProcessedCount = format.processedSamples
+            processedAt = now
+        }
+        val path = format?.let { SignalPath.of(it, settings, engineVolume(), now - processedAt < PROCESSED_HOLD_MS) }
+        if (path == signalPath) return
+        signalPath = path
+        updateRemoteVolume()
+        publish()
+    }
+
+    private fun updateRemoteVolume() {
+        val direct = signalPath.let { it != null && it.kind != SignalPath.Kind.MIXED }
+        if (direct && remoteVolume == null) {
+            val provider = object : VolumeProviderCompat(VOLUME_CONTROL_ABSOLUTE, 100, volumePercent()) {
+                override fun onSetVolumeTo(volume: Int) = setVolume(volume / 100f)
+                override fun onAdjustVolume(direction: Int) {
+                    if (direction != 0) setVolume(settings.volume + direction * VOLUME_KEY_STEP)
+                }
+            }
+            remoteVolume = provider
+            session.setPlaybackToRemote(provider)
+        } else if (!direct && remoteVolume != null) {
+            remoteVolume = null
+            session.setPlaybackToLocal(AudioManager.STREAM_MUSIC)
+        }
+    }
+
+    private fun volumePercent() = (settings.volume * 100f).roundToInt().coerceIn(0, 100)
 
     override fun setAutoAnalyze(enabled: Boolean) {
         updateSettings(settings.copy(autoAnalyze = enabled))
@@ -1174,6 +1262,7 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         monitorJob = scope.launch {
             while (isActive) {
                 if (engine.consumeTrackAdvanced()) onGaplessAdvanced()
+                updateSignalPath()
                 val engineState = engine.state()
                 val loaded = loadedUri != null && loadJob?.isActive != true && pendingTransport == 0
                 if (loaded) {
@@ -1304,6 +1393,8 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
             shuffle = queue.shuffle,
             settings = settings,
             format = if (loadedUri != null) engine.format() else null,
+            signalPath = signalPath,
+            bitPerfectAvailable = bitPerfectAvailable,
             playedUris = playedUris,
             sleepTimerEndsAt = sleepDeadline,
             importing = importing,
@@ -1318,8 +1409,10 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         PlayerWidget.update(this, track?.title, track?.artist?.ifBlank { track.folder }, wantPlaying, art?.takeIf { artUri == track?.uri })
     }
 
+    private fun engineVolume(): Double = if (muted) 0.0 else settings.volume * duckFactor * sleepFactor
+
     private fun applyVolume() {
-        engine.setVolume(if (muted) 0.0 else settings.volume * duckFactor * sleepFactor)
+        engine.setVolume(engineVolume())
     }
 
     private fun applyEq(eq: EqSettings) = engine.setEq(eq)
@@ -1595,6 +1688,9 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         private const val RESTART_THRESHOLD_MS = 3_000L
         private const val MIN_BOOKMARK_MS = 2_000L
         private const val SLEEP_FADE_MS = 30_000L
+        /** How long the indicator says "processed" after the engine last rounded a sample. */
+        private const val PROCESSED_HOLD_MS = 1_500L
+        private const val VOLUME_KEY_STEP = 0.05f
         private const val IDLE_STOP_MS = 10 * 60_000L
         private const val MAX_SKIPS = 5
 

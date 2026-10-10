@@ -2,6 +2,7 @@ package com.aiproject.musicplayer.ui
 
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.SystemClock
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -110,6 +111,7 @@ fun SettingsScreen(
         InfoLine(stringResource(R.string.path_source), format?.let { FormatText.short(it) } ?: "—")
         InfoLine(stringResource(R.string.path_engine), stringResource(R.string.path_engine_value))
         InfoLine(stringResource(R.string.path_output), format?.let { FormatText.output(it) }?.takeIf { it.isNotEmpty() } ?: "—")
+        state.signalPath?.let { InfoLine(stringResource(R.string.path_route), FormatText.path(it)) }
         InfoLine(
             stringResource(R.string.path_device),
             output.device?.let { listOf(it.name, it.summary, output.bluetoothCodec).filter { s -> s.isNotBlank() }.distinct().joinToString(" · ") }
@@ -118,6 +120,21 @@ fun SettingsScreen(
         if ((format?.underruns ?: 0) > 0) InfoLine(stringResource(R.string.underruns), format!!.underruns.toString())
         Spacer(Modifier.height(6.dp))
         Text(stringResource(R.string.signal_path_hint), style = Aw.small, color = aw.muted)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            Spacer(Modifier.height(12.dp))
+            Text(stringResource(R.string.bit_perfect).uppercase(), style = Aw.navLabel, color = aw.muted)
+            Spacer(Modifier.height(6.dp))
+            Segmented(
+                listOf(false, true), state.settings.bitPerfect,
+                label = { stringResource(if (it) R.string.on else R.string.off) },
+                onSelect = commands::setBitPerfect, tone = aw.cyan,
+            )
+            Spacer(Modifier.height(6.dp))
+            if (state.settings.bitPerfect && !state.bitPerfectAvailable) {
+                Text(stringResource(R.string.bit_perfect_unavailable), style = Aw.small, color = aw.amber)
+            }
+            Text(stringResource(R.string.bit_perfect_hint), style = Aw.small, color = aw.muted)
+        }
 
         Spacer(Modifier.height(24.dp))
         SectionHeader("05", stringResource(R.string.renderer), aw.cyan)

@@ -1,8 +1,10 @@
 # Direct output plan: getting past the Android mixer
 
-Status: **planned, not implemented.** This page records where the audio goes
-today, why "bypassing Android" is not as simple as it sounds, and the order in
-which real bit-perfect output should be built.
+Status: **phase 1 implemented in 0.16.0** (bit-perfect mixer attributes,
+integer output with dither, the path indicator); verified on the host, not yet
+on a real phone and DAC (step 6 below). Phase 2 is planned. This page records
+where the audio goes, why "bypassing Android" is not as simple as it sounds, and
+the order in which real bit-perfect output is built.
 
 ## Where the audio goes today
 
@@ -49,6 +51,15 @@ bypassed the **Java** audio stack (MediaPlayer / AudioTrack), not the mixer.
 Option 3 is not worth pursuing for hi-res. The plan is option 1, then option 2.
 
 ## Phase 1: bit-perfect USB on Android 14+
+
+Implemented: `BitPerfectOutput.kt` (device query, format choice, mixer
+attributes), `OboeOutput` direct mode (exact rate and format, no Oboe
+conversion, fallback to the mixer), `PcmEncoder.h` (integer output, dither only
+for rounded samples), `SignalPath.kt` (indicator), remote volume on the media
+session while direct. Deviations from the steps below: the engine asks the app
+for the format through a callback just before each stream opens, so gapless
+rate changes and reconnects get the right mixer attributes too; mono files use
+the mixer unless the DAC lists a mono format.
 
 Goal: when a USB DAC is connected and the user enables "Bit-perfect USB", the
 DAC receives the decoded samples untouched at the track's own rate.

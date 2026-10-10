@@ -14,7 +14,7 @@ enum class Result { OK, ErrorDisconnected, ErrorInternal, ErrorInvalidState };
 enum class Direction { Output };
 enum class PerformanceMode { None, PowerSaving, LowLatency };
 enum class SharingMode { Shared, Exclusive };
-enum class AudioFormat { Float };
+enum class AudioFormat { Float, I16, I24, I32 };
 enum class Usage { Media };
 enum class ContentType { Music };
 enum class SampleRateConversionQuality { None, Fastest, Low, Medium, High, Best };
@@ -45,16 +45,21 @@ inline std::vector<float> captured;
 inline std::atomic<bool> capture{false};
 inline std::atomic<int> openDelayMs{0};     // simulates a slow driver
 inline std::atomic<bool> opening{false};
+inline std::atomic<bool> refuseDirect{false};  // a device without the requested exact format
+inline std::vector<uint8_t> capturedRaw;       // device bytes in the stream's own format
+
+inline size_t formatBytes(AudioFormat f) { return f == AudioFormat::I16 ? 2 : f == AudioFormat::I24 ? 3 : 4; }
 
 class AudioStream {
 public:
-    AudioStream(int rate, int channels, AudioStreamDataCallback* cb, std::shared_ptr<AudioStreamErrorCallback> err)
-        : m_rate(rate), m_channels(channels), m_callback(cb), m_error(std::move(err)) {}
+    AudioStream(int rate, int channels, AudioFormat format, AudioStreamDataCallback* cb,
+                std::shared_ptr<AudioStreamErrorCallback> err)
+        : m_rate(rate), m_channels(channels), m_format(format), m_callback(cb), m_error(std::move(err)) {}
     ~AudioStream() { halt(); }
 
     int getSampleRate() const { return m_rate; }
     int getChannelCount() const { return m_channels; }
-    AudioFormat getFormat() const { return AudioFormat::Float; }
+    AudioFormat getFormat() const { return m_format; }
     StreamState getState() const { return m_state.load(); }
 
     Result requestStart() {
@@ -92,7 +97,9 @@ private:
                 m_callback->onAudioReady(this, out.data(), frames);
                 if (capture) {
                     std::lock_guard<std::mutex> lock(captureMutex);
-                    captured.insert(captured.end(), out.begin(), out.end());
+                    const auto* bytes = reinterpret_cast<const uint8_t*>(out.data());
+                    capturedRaw.insert(capturedRaw.end(), bytes, bytes + out.size() * formatBytes(m_format));
+                    if (m_format == AudioFormat::Float) captured.insert(captured.end(), out.begin(), out.end());
                 }
             }
             std::this_thread::sleep_for(std::chrono::microseconds(1000000LL * frames / m_rate));
@@ -101,6 +108,7 @@ private:
 
     int m_rate;
     int m_channels;
+    AudioFormat m_format;
     AudioStreamDataCallback* m_callback;
     std::shared_ptr<AudioStreamErrorCallback> m_error;
     std::atomic<StreamState> m_state{StreamState::Open};
@@ -117,10 +125,10 @@ public:
     AudioStreamBuilder* setSharingMode(SharingMode) { return this; }
     AudioStreamBuilder* setUsage(Usage) { return this; }
     AudioStreamBuilder* setContentType(ContentType) { return this; }
-    AudioStreamBuilder* setFormat(AudioFormat) { return this; }
+    AudioStreamBuilder* setFormat(AudioFormat f) { m_format = f; return this; }
     AudioStreamBuilder* setFormatConversionAllowed(bool) { return this; }
     AudioStreamBuilder* setChannelConversionAllowed(bool) { return this; }
-    AudioStreamBuilder* setSampleRateConversionQuality(SampleRateConversionQuality) { return this; }
+    AudioStreamBuilder* setSampleRateConversionQuality(SampleRateConversionQuality q) { m_quality = q; return this; }
     AudioStreamBuilder* setChannelCount(int c) { m_channels = c; return this; }
     AudioStreamBuilder* setSampleRate(int r) { m_rate = r; return this; }
     AudioStreamBuilder* setDataCallback(AudioStreamDataCallback* c) { m_callback = c; return this; }
@@ -130,7 +138,11 @@ public:
         if (openDelayMs > 0) std::this_thread::sleep_for(std::chrono::milliseconds(openDelayMs.load()));
         opening = false;
         if (failOpen || m_channels > maxChannels) return Result::ErrorInternal;
-        stream = std::make_shared<AudioStream>(m_rate, m_channels, m_callback, m_error);
+        // Only the direct path asks for no resampling; the shared path must stay float.
+        const bool direct = m_quality == SampleRateConversionQuality::None;
+        if (direct && refuseDirect) return Result::ErrorInternal;
+        if (!direct && m_format != AudioFormat::Float) return Result::ErrorInternal;
+        stream = std::make_shared<AudioStream>(m_rate, m_channels, m_format, m_callback, m_error);
         lastStream = stream;
         ++openCount;
         return Result::OK;
@@ -139,6 +151,8 @@ public:
 private:
     int m_rate = 48000;
     int m_channels = 2;
+    AudioFormat m_format = AudioFormat::Float;
+    SampleRateConversionQuality m_quality = SampleRateConversionQuality::High;
     AudioStreamDataCallback* m_callback = nullptr;
     std::shared_ptr<AudioStreamErrorCallback> m_error;
 };

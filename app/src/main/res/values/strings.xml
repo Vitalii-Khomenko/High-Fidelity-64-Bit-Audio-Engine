@@ -119,6 +119,10 @@
     <string name="path_engine_value">64-bit float decode, EQ and gain</string>
     <string name="path_output">Output</string>
     <string name="path_device">Device</string>
+    <string name="path_route">Route</string>
+    <string name="bit_perfect">Bit-perfect USB</string>
+    <string name="bit_perfect_hint">Sends the file\'s own samples to a USB DAC at the file\'s rate, past Android\'s mixer (Android 14+, if the phone supports it). The system volume does not apply: the volume keys and the app\'s slider set the level, so start low. Other apps\' sounds are muted on the DAC meanwhile. Volume below 100 %, EQ, ReplayGain, crossfeed, speed and the limiter catching a peak make the output \"processed\".</string>
+    <string name="bit_perfect_unavailable">No USB DAC with bit-perfect support is connected.</string>
     <string name="device_speaker">Built-in</string>
     <string name="underruns">Underruns</string>
     <string name="signal_path_hint">Android mixes all apps in shared mode, so the device may resample. DSD is converted to PCM in the engine.</string>

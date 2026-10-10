@@ -321,6 +321,15 @@ public:
     int outputChannels() const { return m_output->isConfigured() ? m_output->channels() : 0; }
     uint64_t underrunCount() const { return m_output->underrunCount(); }
 
+    /** Direct (bit-perfect) output; see hw::OboeOutput::setDirectResolver. */
+    void setDirectOutput(hw::OboeOutput::DirectResolver resolver) { m_output->setDirectResolver(std::move(resolver)); }
+    /** Reopens the output (e.g. the routed device changed), keeping position and queued audio. */
+    void reopenOutput() { m_output->requestReopen(); }
+    bool isDirectOutput() const { return m_output->isConfigured() && m_output->isDirect(); }
+    int outputBits() const { return m_output->isConfigured() ? hw::bitsPerSample(m_output->encoding()) : 0; }
+    bool outputIsFloat() const { return m_output->encoding() == hw::SampleEncoding::Float; }
+    uint64_t inexactOutputSamples() const { return m_output->inexactSamples(); }
+
     /** True once after the audible track changed through a gapless transition. */
     bool consumeTrackAdvanced() {
         {

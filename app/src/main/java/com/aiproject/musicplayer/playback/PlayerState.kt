@@ -12,6 +12,10 @@ data class PlayerState(
     val shuffle: Boolean = false,
     val settings: PlayerSettings = PlayerSettings(),
     val format: StreamFormat? = null,
+    /** Where the audio goes (bit-perfect, direct but processed, or the system mixer); null when idle. */
+    val signalPath: SignalPath? = null,
+    /** Android 14+ and a connected USB DAC that offers bit-perfect formats. */
+    val bitPerfectAvailable: Boolean = false,
     val playedUris: Set<String> = emptySet(),
     /** SystemClock.elapsedRealtime() at which the sleep timer pauses, 0 when off. */
     val sleepTimerEndsAt: Long = 0L,

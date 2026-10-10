@@ -45,6 +45,8 @@ struct Instance {
     }
 };
 
+constexpr jsize kTrackInfoSize = 14;
+
 std::mutex g_mutex;
 std::unordered_map<jlong, std::shared_ptr<Instance>> g_instances;
 jlong g_lastId = 0;
@@ -76,6 +78,56 @@ std::shared_ptr<dec::StreamState> stream(jlong id) {
     const auto it = g_streams.find(id);
     return it == g_streams.end() ? nullptr : it->second;
 }
+
+/**
+ * The app's DirectOutputPolicy, called from whichever thread opens the stream
+ * (control, decode or reconnect thread), so it attaches itself when needed.
+ */
+class DirectPolicy {
+public:
+    DirectPolicy(JNIEnv* env, jobject policy) {
+        env->GetJavaVM(&m_vm);
+        m_policy = env->NewGlobalRef(policy);
+        m_method = env->GetMethodID(env->GetObjectClass(policy), "encodingFor", "(II)I");
+    }
+    ~DirectPolicy() {
+        bool attached = false;
+        if (JNIEnv* env = attach(attached)) {
+            env->DeleteGlobalRef(m_policy);
+            if (attached) m_vm->DetachCurrentThread();
+        }
+    }
+    DirectPolicy(const DirectPolicy&) = delete;
+    DirectPolicy& operator=(const DirectPolicy&) = delete;
+
+    int encodingFor(uint32_t sampleRate, int channels) {
+        if (!m_method) return -1;
+        bool attached = false;
+        JNIEnv* env = attach(attached);
+        if (!env) return -1;
+        jint result = env->CallIntMethod(m_policy, m_method, static_cast<jint>(sampleRate), static_cast<jint>(channels));
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            result = -1;
+        }
+        if (attached) m_vm->DetachCurrentThread();
+        return result;
+    }
+
+private:
+    JNIEnv* attach(bool& attached) {
+        JNIEnv* env = nullptr;
+        const jint status = m_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+        if (status == JNI_OK) return env;
+        if (status != JNI_EDETACHED || m_vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return nullptr;
+        attached = true;
+        return env;
+    }
+
+    JavaVM* m_vm = nullptr;
+    jobject m_policy = nullptr;
+    jmethodID m_method = nullptr;
+};
 
 /** Opens fd with the right decoder; a CUE track becomes a range of the file. */
 std::unique_ptr<dec::IAudioDecoder> openDecoder(int fd, jlong startUs, jlong endUs, jlong streamId = 0) {
@@ -243,6 +295,24 @@ Java_com_aiproject_musicplayer_AudioEngine_nativeSetCrossfeed(JNIEnv*, jobject, 
     if (auto p = player(id)) p->setCrossfeed(preset);
 }
 
+/** policy: a DirectOutputPolicy, or null for the shared mixer only. */
+JNIEXPORT void JNICALL
+Java_com_aiproject_musicplayer_AudioEngine_nativeSetDirectOutput(JNIEnv* env, jobject, jlong id, jobject policy) {
+    auto p = player(id);
+    if (!p) return;
+    if (!policy) {
+        p->setDirectOutput(nullptr);
+        return;
+    }
+    auto shared = std::make_shared<DirectPolicy>(env, policy);
+    p->setDirectOutput([shared](uint32_t rate, int channels) { return shared->encodingFor(rate, channels); });
+}
+
+JNIEXPORT void JNICALL
+Java_com_aiproject_musicplayer_AudioEngine_nativeReopenOutput(JNIEnv*, jobject, jlong id) {
+    if (auto p = player(id)) p->reopenOutput();
+}
+
 JNIEXPORT void JNICALL
 Java_com_aiproject_musicplayer_AudioEngine_nativeSetLimiter(JNIEnv*, jobject, jlong id, jboolean enabled) {
     if (auto p = player(id)) p->setLimiter(enabled == JNI_TRUE);
@@ -274,12 +344,13 @@ Java_com_aiproject_musicplayer_AudioEngine_nativeConsumeTrackAdvanced(JNIEnv*, j
 
 /**
  * out: [sampleRate, channels, bitsPerSample, dsdRate, codec, outputRate,
- *       outputChannels, gainCentiDb, serialLow32, underruns]
+ *       outputChannels, gainCentiDb, serialLow32, underruns, outputDirect,
+ *       outputBits, outputFloat, processedSamplesLow31]
  */
 JNIEXPORT void JNICALL
 Java_com_aiproject_musicplayer_AudioEngine_nativeGetTrackInfo(JNIEnv* env, jobject, jlong id, jintArray out) {
     if (!out) return;
-    jint values[10] = {};
+    jint values[kTrackInfoSize] = {};
     if (auto p = player(id)) {
         const TrackInfo info = p->trackInfo();
         values[0] = static_cast<jint>(info.sampleRate);
@@ -292,8 +363,13 @@ Java_com_aiproject_musicplayer_AudioEngine_nativeGetTrackInfo(JNIEnv* env, jobje
         values[7] = static_cast<jint>(std::lround(info.gainDb * 100.0));
         values[8] = static_cast<jint>(info.serial & 0x7fffffff);
         values[9] = static_cast<jint>(std::min<uint64_t>(p->underrunCount(), 0x7fffffff));
+        values[10] = p->isDirectOutput() ? 1 : 0;
+        values[11] = p->outputBits();
+        values[12] = p->outputIsFloat() ? 1 : 0;
+        // A counter that wraps: the app compares successive values.
+        values[13] = static_cast<jint>(p->inexactOutputSamples() & 0x7fffffff);
     }
-    const jsize n = std::min<jsize>(env->GetArrayLength(out), 10);
+    const jsize n = std::min<jsize>(env->GetArrayLength(out), kTrackInfoSize);
     env->SetIntArrayRegion(out, 0, n, values);
 }
 

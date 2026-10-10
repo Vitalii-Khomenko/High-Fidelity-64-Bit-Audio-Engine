@@ -21,6 +21,8 @@ data class PlayerSettings(
     val autoAnalyze: Boolean = true,
     /** Visible on the network as a DLNA / UPnP renderer. */
     val renderer: Boolean = false,
+    /** Bit-perfect output to a USB DAC (Android 14+, when the device supports it). */
+    val bitPerfect: Boolean = false,
 )
 
 data class SavedQueue(
@@ -56,6 +58,7 @@ class PlayerStore(context: Context) {
         limiter = prefs.getBoolean(KEY_LIMITER, true),
         autoAnalyze = prefs.getBoolean(KEY_AUTO_ANALYZE, true),
         renderer = prefs.getBoolean(KEY_RENDERER, false),
+        bitPerfect = prefs.getBoolean(KEY_BIT_PERFECT, false),
     )
 
     fun saveSettings(s: PlayerSettings) {
@@ -75,6 +78,7 @@ class PlayerStore(context: Context) {
             .putBoolean(KEY_LIMITER, s.limiter)
             .putBoolean(KEY_AUTO_ANALYZE, s.autoAnalyze)
             .putBoolean(KEY_RENDERER, s.renderer)
+            .putBoolean(KEY_BIT_PERFECT, s.bitPerfect)
             .apply()
     }
 
@@ -165,6 +169,7 @@ class PlayerStore(context: Context) {
         private const val KEY_LIMITER = "true_peak_limiter"
         private const val KEY_AUTO_ANALYZE = "loudness_auto_analyze"
         private const val KEY_RENDERER = "dlna_renderer"
+        private const val KEY_BIT_PERFECT = "bit_perfect_usb"
 
         fun encodeTracks(tracks: List<Track>): String = JSONArray().apply {
             tracks.forEach { t ->

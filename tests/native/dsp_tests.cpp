@@ -9,6 +9,7 @@
 #include "dsp/ParametricEq.h"
 #include "dsp/TruePeak.h"
 #include "dsp/TruePeakLimiter.h"
+#include "hw/PcmEncoder.h"
 
 using namespace audio_engine;
 using namespace test;
@@ -190,14 +191,59 @@ void testLoudnessScan() {
     close(bad);
 }
 
+// Device conversion: exact samples pass untouched, rounded ones are dithered.
+void testPcmEncoder() {
+    using hw::SampleEncoding;
+    hw::PcmEncoder enc;
+    std::vector<double> src;
+    for (int v : {0, 1, -1, 12345, -32768, 32767}) src.push_back(v / 32768.0);
+
+    int16_t i16[6];
+    CHECK(enc.encode(src.data(), 6, i16, SampleEncoding::I16) == 0);
+    for (size_t i = 0; i < 6; ++i) CHECK(i16[i] == static_cast<int16_t>(src[i] * 32768.0));
+
+    uint8_t i24[18];
+    CHECK(enc.encode(src.data(), 6, i24, SampleEncoding::I24) == 0);
+    for (size_t i = 0; i < 6; ++i) {
+        const int32_t v = static_cast<int32_t>(static_cast<uint32_t>(i24[i * 3]) << 8 |
+                                               static_cast<uint32_t>(i24[i * 3 + 1]) << 16 |
+                                               static_cast<uint32_t>(i24[i * 3 + 2]) << 24) >> 8;
+        CHECK(v == static_cast<int32_t>(src[i] * 32768.0) * 256);
+    }
+
+    int32_t i32[6];
+    float f32[6];
+    CHECK(enc.encode(src.data(), 6, i32, SampleEncoding::I32) == 0);
+    CHECK(enc.encode(src.data(), 6, f32, SampleEncoding::Float) == 0);
+    for (size_t i = 0; i < 6; ++i) {
+        CHECK(i32[i] == static_cast<int32_t>(src[i] * 32768.0) * 65536);
+        CHECK(static_cast<double>(f32[i]) == src[i]);
+    }
+
+    // Full scale and overs clamp to the largest code instead of wrapping.
+    const double overs[2] = {1.0, -1.5};
+    CHECK(enc.encode(overs, 2, i16, SampleEncoding::I16) == 0);
+    CHECK(i16[0] == 32767 && i16[1] == -32768);
+
+    // A quarter LSB: plain rounding would give 0 forever; TPDF dither keeps the
+    // mean (linear quantiser) with errors never beyond ±1.5 LSB.
+    std::vector<double> quarter(200000, 0.25 / 32768.0);
+    std::vector<int16_t> q(quarter.size());
+    CHECK(enc.encode(quarter.data(), quarter.size(), q.data(), SampleEncoding::I16) == quarter.size());
+    double mean = 0.0;
+    for (int16_t v : q) { CHECK(v >= -1 && v <= 2); mean += v; }
+    CHECK_NEAR(mean / q.size(), 0.25, 0.01);
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     testParametricEq();
     testCrossfeed();
     testTruePeak();
     testLimiter();
+    testPcmEncoder();
     testLoudness();
     testLoudnessScan();
-    std::puts("DSP tests passed: parametric EQ, crossfeed, true peak, limiter, loudness.");
+    std::puts("DSP tests passed: parametric EQ, crossfeed, true peak, limiter, loudness, PCM encoder.");
     return 0;
 }

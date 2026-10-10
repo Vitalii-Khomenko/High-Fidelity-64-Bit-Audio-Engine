@@ -120,6 +120,10 @@
     <string name="path_engine_value">64-бит float: декодирование, EQ, усиление</string>
     <string name="path_output">Выход</string>
     <string name="path_device">Устройство</string>
+    <string name="path_route">Маршрут</string>
+    <string name="bit_perfect">Bit-perfect USB</string>
+    <string name="bit_perfect_hint">Передаёт на USB-ЦАП собственные сэмплы файла с его частотой, минуя микшер Android (Android 14+, если телефон это поддерживает). Системная громкость не действует: уровень задают кнопки громкости и ползунок приложения, поэтому начинайте с малого. Звуки других приложений на ЦАП при этом заглушаются. Громкость ниже 100 %, эквалайзер, ReplayGain, кроссфид, скорость и сработавший лимитер делают выход «обработанным».</string>
+    <string name="bit_perfect_unavailable">USB-ЦАП с поддержкой bit-perfect не подключён.</string>
     <string name="device_speaker">Встроенное</string>
     <string name="underruns">Опустошения буфера</string>
     <string name="signal_path_hint">В общем режиме Android смешивает звук всех приложений, поэтому устройство может передискретизировать сигнал. DSD преобразуется в PCM в движке.</string>

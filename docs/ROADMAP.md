@@ -2,10 +2,11 @@
 
 ## Limitations
 
-- **Shared-mode output.** Android mixes all apps; the system may resample and
-  applies its own volume. The plan for bit-perfect USB output (Android 14
-  mixer attributes, then an own USB Audio Class driver) is in
-  [DIRECT_OUTPUT_PLAN.md](DIRECT_OUTPUT_PLAN.md).
+- **Shared-mode output** except for *Bit-perfect USB* on Android 14+ (USB DACs
+  only, where the phone supports it; not yet confirmed on real hardware).
+  Android ≤ 13, Bluetooth and the phone's own outputs go through the mixer,
+  which may resample and applies its own volume. Phase 2 (an own USB Audio
+  Class driver) is in [DIRECT_OUTPUT_PLAN.md](DIRECT_OUTPUT_PLAN.md).
 - **DSD is converted to PCM.** No DoP or native DSD output (part of the plan above).
 - **Formats.** AAC and ALAC depend on the phone's MediaCodec (almost every
   phone has AAC; ALAC from Android 10 on most devices). DSD inside WavPack and
@@ -37,9 +38,9 @@
 
 ## Next steps
 
-1. Bit-perfect USB output, phase 1 (Android 14 mixer attributes) with an honest
-   signal-path indicator — [DIRECT_OUTPUT_PLAN.md](DIRECT_OUTPUT_PLAN.md).
-2. Integer output with dither, then the own USB driver (phase 2, incl. DoP).
+1. Confirm phase 1 on a Pixel 8+ with a UAC2 DAC (rates on the DAC display,
+   loop-back bit-exactness) — [DIRECT_OUTPUT_PLAN.md](DIRECT_OUTPUT_PLAN.md).
+2. The own USB driver (phase 2, incl. DoP).
 3. CUE sheets embedded in FLAC; CUE and lyrics for MediaStore tracks.
 4. A higher-quality music time-stretcher (phase vocoder / WSOLA in double precision).
 5. Instrumented playback tests on CI with an emulator.
