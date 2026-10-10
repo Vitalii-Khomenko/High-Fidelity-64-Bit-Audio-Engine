@@ -105,6 +105,11 @@ converted to PCM (no DoP yet). Details in
 [docs/DIRECT_OUTPUT_PLAN.md](docs/DIRECT_OUTPUT_PLAN.md); other limits are in
 [docs/ROADMAP.md](docs/ROADMAP.md).
 
+## Acknowledgements
+
+[@esildooor-commits](https://github.com/esildooor-commits) — help with development,
+testing on real devices, ideas and motivation.
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Third-party components keep their own licenses

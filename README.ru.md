@@ -93,6 +93,11 @@ UAC1 / UAC2) или *Bit-perfect USB* (Android 14+, если телефон по
 Подробности — в [docs/DIRECT_OUTPUT_PLAN.md](docs/DIRECT_OUTPUT_PLAN.md) (на английском);
 остальные ограничения — в [docs/ROADMAP.md](docs/ROADMAP.md).
 
+## Благодарности
+
+[@esildooor-commits](https://github.com/esildooor-commits) — помощь в разработке,
+тестирование на реальных устройствах, идеи и мотивация.
+
 ## Лицензия
 
 MIT — см. [LICENSE](LICENSE). Сторонние компоненты распространяются по своим
