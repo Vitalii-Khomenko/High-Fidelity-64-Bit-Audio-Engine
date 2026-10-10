@@ -45,6 +45,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import com.aiproject.musicplayer.library.AutoEqCatalog
 import com.aiproject.musicplayer.library.AutoEqEntry
 import com.aiproject.musicplayer.library.AutoEqParser
+import com.aiproject.musicplayer.playback.VolumeCurve
 import com.aiproject.musicplayer.playback.CrossfeedMode
 import com.aiproject.musicplayer.playback.EqDefaults
 import com.aiproject.musicplayer.playback.EqMode
@@ -74,7 +75,7 @@ fun SoundScreen(state: PlayerState, commands: PlayerCommands) {
 
         // 01 Volume
         SectionHeader("01", stringResource(R.string.volume), aw.cyan) {
-            Text("${(settings.volume * 100).roundToInt()}%", style = Aw.heading, color = aw.paper)
+            Text(VolumeCurve.label(settings.volume), style = Aw.heading, color = aw.paper)
         }
         PixelSlider(settings.volume, commands::setVolume, tone = aw.cyan)
         Text(stringResource(R.string.volume_hint), style = Aw.small, color = aw.muted)

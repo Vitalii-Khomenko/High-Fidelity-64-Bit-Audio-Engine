@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.2 — 2026-10-10
+
+- **Smooth volume with a USB DAC.** With direct or own-driver output the app's volume is the only one, and it was a linear gain: the top half of the slider covered 6 dB and the bottom tenth everything from −20 dB to silence, and the keys moved in 5 % linear steps. The volume is now a decibel scale (0 to −60 dB, then silence; equal travel, equal change in loudness), the keys move 2 dB, and the Sound screen shows the level in dB. Saved volumes are converted at the same loudness; the top stays exactly unity gain, so bit-perfect is unaffected.
+- **No stutter while dragging.** A volume change used to publish the whole player state (media session over IPC), rewrite the settings file and update the system volume control on every slider step. Now only the engine and the screen update at once; the settings are saved when the slider rests, and the system control is updated only for changes that did not come from it.
+
 ## 0.19.1 — 2026-10-10
 
 - **DLNA renderer: switching it off closed the app** (also when the app was closed with it on). Stopping interrupts the server's threads, and the SSDP announcement loop let the `InterruptedException` of its sleep escape, which ends the process on Android. The loop now ends quietly, and every server task is guarded so that no exception can leave a server thread. Found with a test that runs the renderer with discovery on (the earlier tests ran without it).

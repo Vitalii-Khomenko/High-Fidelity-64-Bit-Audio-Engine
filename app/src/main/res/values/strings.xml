@@ -87,7 +87,7 @@
     <string name="add_all">Add all</string>
 
     <string name="volume">Volume</string>
-    <string name="volume_hint" formatted="false">Applied in the engine after the buffer, so changes are heard at once. Use the system volume for loudness; keep this at 100% for unaltered output.</string>
+    <string name="volume_hint" formatted="false">Applied in the engine after the buffer, so changes are heard at once. A decibel scale: equal travel, equal change in loudness. Through Android\'s mixer use the system volume and keep this at 0 dB for unaltered output; with a USB DAC played directly this is the only volume, and the volume keys move it in 2 dB steps.</string>
     <string name="speed">Speed</string>
     <string name="stretch_profile">Time-stretch profile</string>
     <string name="profile_music">Music</string>

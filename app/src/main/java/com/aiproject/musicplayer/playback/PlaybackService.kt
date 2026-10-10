@@ -73,7 +73,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
-import kotlin.math.roundToInt
 
 /**
  * Owns playback: the native engine, the queue, audio focus, the media session
@@ -172,6 +171,7 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
     private var processedAt = Long.MIN_VALUE / 2
     // While the output is direct the system volume does nothing: the keys drive the engine volume.
     private var remoteVolume: VolumeProviderCompat? = null
+    private var volumeSaveJob: Job? = null
     private val usbCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>) = onUsbChanged(added)
         override fun onAudioDevicesRemoved(removed: Array<out AudioDeviceInfo>) = onUsbChanged(removed)
@@ -409,6 +409,7 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
     override fun onDestroy() {
         stopRenderer()
         saveResumePoint()
+        if (volumeSaveJob?.isActive == true) store.saveSettings(settings)   // a volume change not yet saved
         scope.cancel()
         try { unregisterReceiver(noisyReceiver) } catch (_: Exception) {}
         usbDriver.disable()   // queued before engine.release() on the engine thread
@@ -625,10 +626,29 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
 
     // ── Sound settings ───────────────────────────────────────────────────────
 
-    override fun setVolume(volume: Float) {
-        updateSettings(settings.copy(volume = volume.coerceIn(0f, 1f)))
+    override fun setVolume(volume: Float) = changeVolume(volume, fromSystem = false)
+
+    /**
+     * Called for every slider movement and key press, so it stays light: the
+     * engine and the screen at once, the settings file once the slider rests,
+     * and the system volume control only when the change did not come from it.
+     */
+    private fun changeVolume(volume: Float, fromSystem: Boolean) {
+        val v = volume.coerceIn(0f, 1f)
+        if (v == settings.volume) return
+        settings = settings.copy(volume = v)
         applyVolume()
-        remoteVolume?.currentVolume = volumePercent()
+        _state.value = _state.value.copy(settings = settings)
+        if (renderer != null) updateRendererStatus()
+        if (!fromSystem) remoteVolume?.let { provider ->
+            val step = VolumeCurve.step(v)
+            if (provider.currentVolume != step) provider.currentVolume = step
+        }
+        volumeSaveJob?.cancel()
+        volumeSaveJob = scope.launch {
+            delay(VOLUME_SAVE_DELAY_MS)
+            store.saveSettings(settings)
+        }
     }
 
     override fun setSpeed(speed: Float) {
@@ -724,10 +744,18 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
     private fun updateRemoteVolume() {
         val direct = signalPath.let { it != null && it.kind != SignalPath.Kind.MIXED }
         if (direct && remoteVolume == null) {
-            val provider = object : VolumeProviderCompat(VOLUME_CONTROL_ABSOLUTE, 100, volumePercent()) {
-                override fun onSetVolumeTo(volume: Int) = setVolume(volume / 100f)
+            // The keys move in 2 dB steps on the same decibel scale as the slider.
+            val provider = object : VolumeProviderCompat(VOLUME_CONTROL_ABSOLUTE, VolumeCurve.STEPS, VolumeCurve.step(settings.volume)) {
+                override fun onSetVolumeTo(volume: Int) {
+                    val step = volume.coerceIn(0, VolumeCurve.STEPS)
+                    currentVolume = step
+                    changeVolume(step / VolumeCurve.STEPS.toFloat(), fromSystem = true)
+                }
                 override fun onAdjustVolume(direction: Int) {
-                    if (direction != 0) setVolume(settings.volume + direction * VOLUME_KEY_STEP)
+                    if (direction == 0) return
+                    val step = (VolumeCurve.step(settings.volume) + direction).coerceIn(0, VolumeCurve.STEPS)
+                    currentVolume = step
+                    changeVolume(step / VolumeCurve.STEPS.toFloat(), fromSystem = true)
                 }
             }
             remoteVolume = provider
@@ -738,7 +766,6 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         }
     }
 
-    private fun volumePercent() = (settings.volume * 100f).roundToInt().coerceIn(0, 100)
 
     override fun setAutoAnalyze(enabled: Boolean) {
         updateSettings(settings.copy(autoAnalyze = enabled))
@@ -1439,7 +1466,7 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         PlayerWidget.update(this, track?.title, track?.artist?.ifBlank { track.folder }, wantPlaying, art?.takeIf { artUri == track?.uri })
     }
 
-    private fun engineVolume(): Double = if (muted) 0.0 else settings.volume * duckFactor * sleepFactor
+    private fun engineVolume(): Double = if (muted) 0.0 else VolumeCurve.gain(settings.volume) * duckFactor * sleepFactor
 
     private fun applyVolume() {
         engine.setVolume(engineVolume())
@@ -1720,7 +1747,7 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         private const val SLEEP_FADE_MS = 30_000L
         /** How long the indicator says "processed" after the engine last rounded a sample. */
         private const val PROCESSED_HOLD_MS = 1_500L
-        private const val VOLUME_KEY_STEP = 0.05f
+        private const val VOLUME_SAVE_DELAY_MS = 500L
         private const val IDLE_STOP_MS = 10 * 60_000L
         private const val MAX_SKIPS = 5
 

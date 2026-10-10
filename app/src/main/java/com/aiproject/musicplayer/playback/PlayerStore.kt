@@ -10,6 +10,7 @@ data class PlayerSettings(
     val contentMode: ContentMode = ContentMode.MUSIC,
     val speed: Float = 1f,
     val speedMode: SpeedMode = SpeedMode.MUSIC,
+    /** Position on the app's decibel volume scale (VolumeCurve), 1 = 0 dB. */
     val volume: Float = 1f,
     val eq: EqSettings = EqSettings(),
     val replayGain: ReplayGainMode = ReplayGainMode.TRACK,
@@ -44,11 +45,19 @@ class PlayerStore(context: Context) {
     private val prefs: SharedPreferences = context.getSharedPreferences("player_state", Context.MODE_PRIVATE)
     private val progress: SharedPreferences = context.getSharedPreferences("audiobook_progress", Context.MODE_PRIVATE)
 
+    /** The decibel-scale position; older versions stored a linear gain, converted at the same loudness. */
+    private fun loadVolume(): Float {
+        val position = prefs.getFloat(KEY_VOLUME_POSITION, Float.NaN)
+        if (position.isFinite()) return position.coerceIn(0f, 1f)
+        val linear = prefs.getFloat(KEY_VOLUME, 1f)
+        return if (linear.isFinite()) VolumeCurve.positionOf(linear.toDouble()) else 1f
+    }
+
     fun loadSettings(): PlayerSettings = PlayerSettings(
         contentMode = ContentMode.fromId(prefs.getInt(KEY_CONTENT_MODE, ContentMode.MUSIC.id)),
         speed = PlaybackSpeed.clamp(prefs.getFloat(KEY_SPEED, 1f)),
         speedMode = SpeedMode.fromId(prefs.getInt(KEY_SPEED_MODE, SpeedMode.MUSIC.id)),
-        volume = prefs.getFloat(KEY_VOLUME, 1f).takeIf { it.isFinite() }?.coerceIn(0f, 1f) ?: 1f,
+        volume = loadVolume(),
         eq = EqSettings.deserialize(
             prefs.getBoolean(KEY_EQ_ENABLED, false), prefs.getString(KEY_EQ_GAINS, null),
             prefs.getInt(KEY_EQ_MODE, 0), prefs.getString(KEY_EQ_PROFILE, null),
@@ -69,7 +78,7 @@ class PlayerStore(context: Context) {
             .putInt(KEY_CONTENT_MODE, s.contentMode.id)
             .putFloat(KEY_SPEED, s.speed)
             .putInt(KEY_SPEED_MODE, s.speedMode.id)
-            .putFloat(KEY_VOLUME, s.volume)
+            .putFloat(KEY_VOLUME_POSITION, s.volume)
             .putBoolean(KEY_EQ_ENABLED, s.eq.enabled)
             .putString(KEY_EQ_GAINS, s.eq.serialize())
             .putInt(KEY_REPLAY_GAIN, s.replayGain.id)
@@ -160,7 +169,8 @@ class PlayerStore(context: Context) {
         private const val KEY_CONTENT_MODE = "playback_content_mode"
         private const val KEY_SPEED = "playback_speed"
         private const val KEY_SPEED_MODE = "playback_speed_mode"
-        private const val KEY_VOLUME = "volume"
+        private const val KEY_VOLUME = "volume"                    // linear gain, up to 0.19.1
+        private const val KEY_VOLUME_POSITION = "volume_position"  // VolumeCurve position
         private const val KEY_EQ_ENABLED = "eq_enabled"
         private const val KEY_EQ_GAINS = "eq_gains"
         private const val KEY_REPLAY_GAIN = "replaygain_mode"
