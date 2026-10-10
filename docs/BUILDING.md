@@ -26,6 +26,8 @@ sdk.dir=/path/to/Android/Sdk
 | `./gradlew assembleRelease` | `…/release/app-release.apk` | `com.aiproject.musicplayer` | your release key |
 | `./gradlew assembleAudit` | `…/audit/app-audit.apk` | `com.aiproject.musicplayer.audit` | separate test key |
 
+The latest signed audit APK is always published in [`dist/`](../dist/) (one file, replaced on every version bump), so it can be tested or shared without building.
+
 The audit variant is the release build with its own application id and label
 (*HiFi Player Audit*), so it installs next to the main app with separate data.
 
