@@ -5,7 +5,8 @@
 - **Shared-mode output** except for *Bit-perfect USB* on Android 14+ (USB DACs
   only, where the phone supports it; not yet confirmed on real hardware).
   Android ≤ 13, Bluetooth and the phone's own outputs go through the mixer,
-  which may resample and applies its own volume. Phase 2 (an own USB Audio
+  which applies the system volume and the phone's sound effects. The engine
+  converts to the mixer's rate itself (64-bit), so the mixer does not resample. Phase 2 (an own USB Audio
   Class driver) is in [DIRECT_OUTPUT_PLAN.md](DIRECT_OUTPUT_PLAN.md).
 - **DSD is converted to PCM.** No DoP or native DSD output (part of the plan above).
 - **Formats.** AAC and ALAC depend on the phone's MediaCodec (almost every

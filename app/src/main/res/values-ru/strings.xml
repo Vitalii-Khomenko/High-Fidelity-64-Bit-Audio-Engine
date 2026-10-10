@@ -126,7 +126,7 @@
     <string name="bit_perfect_unavailable">USB-ЦАП с поддержкой bit-perfect не подключён.</string>
     <string name="device_speaker">Встроенное</string>
     <string name="underruns">Опустошения буфера</string>
-    <string name="signal_path_hint">В общем режиме Android смешивает звук всех приложений, поэтому устройство может передискретизировать сигнал. DSD преобразуется в PCM в движке.</string>
+    <string name="signal_path_hint">В общем режиме Android смешивает звук всех приложений на своей частоте (обычно 48 кГц). Движок сам переводит другие частоты в неё в 64 битах, поэтому микшер не передискретизирует; системная громкость и звуковые эффекты телефона при этом действуют. DSD преобразуется в PCM в движке.</string>
     <string name="about">О программе</string>
     <string name="version">Версия</string>
     <string name="about_text">Собственный нативный движок на C++: 64-битная обработка, gapless, преобразование DSD в PCM и выход через Oboe. Свободный открытый код.</string>

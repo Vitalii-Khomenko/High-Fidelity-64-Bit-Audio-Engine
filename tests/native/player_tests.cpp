@@ -391,7 +391,7 @@ void testFormatChangeTransition() {
     CHECK(p.play());
     CHECK(waitFor([&] { return p.consumeTrackAdvanced(); }));
     CHECK(p.trackInfo().sampleRate == 44100);
-    CHECK(p.outputSampleRate() == 44100);
+    CHECK(p.outputSampleRate() == 48000);   // the mixer's rate: the engine converts
     CHECK(p.outputChannels() == 1);
     CHECK(p.state() == PlayerState::Playing);
     CHECK(waitFor([&] { return p.state() == PlayerState::Ended; }));
@@ -820,6 +820,42 @@ void testDirectOutputFollowsFormatAndSwitch() {
     p.setDirectOutput(nullptr);  // stopped: nothing to reopen
 }
 
+// A file at another rate than the mixer is converted in the engine: the device
+// stream runs at the mixer's rate, positions stay in the file's frames, the
+// tone keeps its pitch and level, pause/resume loses nothing.
+void testEngineResamplesToMixerRate() {
+    core::AudioPlayer p;
+    auto decoder = std::make_unique<ToneDecoder>(44100, 44100, 2, 0.5, 1000.0);
+    ToneDecoder* raw = decoder.get();
+    CHECK(p.load(std::move(decoder), 1.0));
+    CHECK(p.trackInfo().sampleRate == 44100);
+    CHECK(p.outputSampleRate() == 48000);
+    const int seeks = raw->seeks;
+    startCapture();
+    CHECK(p.play());
+    CHECK(waitFor([&] { return p.positionMs() > 300.0; }));
+    p.pause();
+    std::this_thread::sleep_for(30ms);
+    CHECK(p.play());
+    CHECK(waitFor([&] { return p.state() == PlayerState::Ended; }));
+    oboe::capture = false;
+    CHECK_NEAR(p.positionMs(), 1000.0, 0.5);
+    CHECK(raw->seeks == seeks);
+    // Before the pause: a clean 1 kHz at 48 kHz, full level.
+    const auto out = takeCapture();
+    std::vector<double> left;
+    for (size_t i = 0; i < out.size(); i += 2) left.push_back(out[i]);
+    size_t start = 0;
+    while (start < left.size() && left[start] == 0.0f) ++start;
+    const size_t from = start + 2000, to = start + 12000;   // past the fade-in, before the pause
+    CHECK(to < left.size());
+    std::vector<double> residual;
+    CHECK_NEAR(test::fitSine(left, from, to, 1000.0, 48000.0, &residual), 0.5, 1e-4);
+    double rms = 0.0;
+    for (size_t n = from; n < to; ++n) rms += residual[n] * residual[n];
+    CHECK(std::sqrt(rms / double(to - from)) < 0.5 * 1e-5);   // float output: ~-100 dB is the floor
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     testPlaysToEnd();
@@ -848,13 +884,14 @@ int main() {
     testConcurrentControl();
     testPlayDuringGaplessSwitch();
     testDestroyWhilePlaying();
+    testEngineResamplesToMixerRate();
     testDirectOutputIsBitExact();
     testDirectOutputVolume();
     testDirectOutputRefusedFallsBack();
     testDirectOutputFollowsFormatAndSwitch();
     std::puts("Player tests passed: end/drain, sample-exact pause/resume, immediate volume, seek, gapless, "
               "seek/clear during gapless look-ahead, format change, downmix fallback, output failure, reconnect, "
-              "failed restart, limiter+EQ, speed, spectrum, concurrency, direct output (bit-exact 16→24, exact volume, "
+              "failed restart, limiter+EQ, speed, spectrum, concurrency, engine SRC to the mixer rate, direct output (bit-exact 16→24, exact volume, "
               "fallback, format change, mode switch), audit A01-A04/A07/A08 regressions.");
     return 0;
 }

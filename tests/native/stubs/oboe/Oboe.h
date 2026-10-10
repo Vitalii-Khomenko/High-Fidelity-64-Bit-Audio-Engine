@@ -45,6 +45,7 @@ inline std::vector<float> captured;
 inline std::atomic<bool> capture{false};
 inline std::atomic<int> openDelayMs{0};     // simulates a slow driver
 inline std::atomic<bool> opening{false};
+inline std::atomic<int> nativeRate{48000};       // the mixer rate a stream gets without asking for one
 inline std::atomic<bool> refuseDirect{false};  // a device without the requested exact format
 inline std::vector<uint8_t> capturedRaw;       // device bytes in the stream's own format
 
@@ -149,7 +150,7 @@ public:
     }
 
 private:
-    int m_rate = 48000;
+    int m_rate = nativeRate.load();
     int m_channels = 2;
     AudioFormat m_format = AudioFormat::Float;
     SampleRateConversionQuality m_quality = SampleRateConversionQuality::High;

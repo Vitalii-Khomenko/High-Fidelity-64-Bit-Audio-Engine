@@ -85,5 +85,8 @@ class SignalPathTest {
     @Test fun `output text names the route`() {
         assertEquals("Out 96 kHz 24-bit · direct", FormatText.output(format()))
         assertEquals("Out 44.1 kHz float · mixer", FormatText.output(format(rate = 44_100, direct = false).copy(outputFloat = true)))
+        val converted = format(rate = 44_100, direct = false).copy(outputRate = 48_000, outputFloat = true)
+        assertEquals("Out 48 kHz float · 64-bit SRC · mixer", FormatText.output(converted))
+        assertEquals("MIXER 48 kHz", FormatText.path(SignalPath.of(converted, flat, 1.0, false)!!))
     }
 }

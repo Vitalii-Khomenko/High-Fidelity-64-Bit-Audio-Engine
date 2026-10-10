@@ -317,7 +317,8 @@ public:
         return m_current;
     }
 
-    uint32_t outputSampleRate() const { return m_output->isConfigured() ? m_output->sampleRate() : 0; }
+    /** The device stream's rate (the mixer's own rate when the engine resamples). */
+    uint32_t outputSampleRate() const { return m_output->isConfigured() ? m_output->deviceRate() : 0; }
     int outputChannels() const { return m_output->isConfigured() ? m_output->channels() : 0; }
     uint64_t underrunCount() const { return m_output->underrunCount(); }
 
@@ -348,7 +349,7 @@ public:
             return;
         }
         m_output->copySpectrum(m_spectrumSamples.data(), m_spectrumSamples.size());
-        m_analyzer.analyze(m_spectrumSamples.data(), m_output->sampleRate(), bands, count);
+        m_analyzer.analyze(m_spectrumSamples.data(), m_output->deviceRate(), bands, count);
     }
 
 private:

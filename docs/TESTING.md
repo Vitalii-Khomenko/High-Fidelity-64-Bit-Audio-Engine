@@ -83,7 +83,11 @@ without dither while 0.3 is dithered and reported, a refused format falls back
 to the float mixer stream, the app is asked again on a rate change across
 tracks, and leaving direct mode while playing keeps the position.
 
-`dsp_tests.cpp` also checks the device PCM encoder: exact 16/24/32-bit and
+`dsp_tests.cpp` checks the engine's sample-rate converter (44.1 → 48 kHz level
+and residual below −120 dB, flat at 19.9 kHz, a 30 kHz tone at 96 kHz kept
+130 dB below 18 kHz after 96 → 48 kHz, the same samples for any callback size)
+and the player runs a 44.1 kHz track into a 48 kHz device with an exact
+position across pause / resume. It also checks the device PCM encoder: exact 16/24/32-bit and
 float values pass unchanged, overs clamp, and a quarter-LSB signal keeps its
 mean under TPDF dither.
 

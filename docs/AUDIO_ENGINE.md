@@ -8,7 +8,8 @@ src/
   core/AudioPlayer.h        transport, decode thread, position model, gapless
   core/AudioBuffer.h        planar double buffer
   core/RingBuffer.h         lock-free SPSC ring with a safe flush
-  hw/OboeOutput.h           ring -> volume/fade/limiter -> Oboe float stream
+  hw/OboeOutput.h           ring -> [SRC] -> volume/fade/limiter -> PCM encoder -> Oboe stream
+  hw/PcmEncoder.h           float / 16 / 24 / 32-bit device samples, dither only when rounding
   decoders/                 all decoders, container sniffing, duration probe, loudness scan
   tags/                     tag reader (Vorbis comments, ID3, APEv2, MP4, covers)
   dsp/                      parametric EQ, crossfeed, true-peak limiter, loudness meter,
@@ -111,10 +112,19 @@ finishes after `load()` or `clearNext()` is discarded.
 ## Output stage (`hw/OboeOutput.h`)
 
 Stream settings: shared mode, `PerformanceMode::None` (normal mixer path, lower
-power than low-latency), usage *media* / content *music*, float format.
-Format, channel and sample-rate conversion by Oboe are allowed
-(`SampleRateConversionQuality::High`), so a device that refuses e.g. 352.8 kHz
-still plays correctly. If a multichannel layout cannot be opened the engine
+power than low-latency), usage *media* / content *music*, float format. The
+stream opens at the mixer's own rate (no rate requested). When the file's rate
+differs, the callback converts it (`dsp/Resampler.h`: exact rational polyphase
+filter, Kaiser-windowed sinc in double precision, flat to 45.35 % of the lower
+rate, 140 dB stopband design, ~2 ms delay), so the mixer does not resample. The
+ring and all frame counts stay at the file's rate; fades, gain ramps and the
+spectrum run at the device rate. Ratios that would need a huge filter table fall
+back to Oboe's converter (`SampleRateConversionQuality::High`).
+
+**Direct mode** (bit-perfect USB, Android 14+): the app's resolver sets the
+mixer attributes and names the encoding; the stream opens at the file's rate
+with every Oboe conversion disabled and falls back to the shared path when
+refused. Integer output goes through `hw/PcmEncoder.h`. If a multichannel layout cannot be opened the engine
 opens stereo and folds down (`dsp/ChannelMixer.h`: centre and surrounds at
 −3 dB, LFE dropped, normalised).
 

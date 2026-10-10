@@ -125,7 +125,7 @@
     <string name="bit_perfect_unavailable">No USB DAC with bit-perfect support is connected.</string>
     <string name="device_speaker">Built-in</string>
     <string name="underruns">Underruns</string>
-    <string name="signal_path_hint">Android mixes all apps in shared mode, so the device may resample. DSD is converted to PCM in the engine.</string>
+    <string name="signal_path_hint">In shared mode Android mixes all apps at its own rate (usually 48 kHz). The engine converts other rates to it itself in 64-bit, so the mixer does not resample; the system volume and the phone\'s sound effects still apply. DSD is converted to PCM in the engine.</string>
     <string name="about">About</string>
     <string name="version">Version</string>
     <string name="about_text">Native C++ playback engine with 64-bit DSP, gapless playback, DSD-to-PCM conversion and an Oboe output stage. Free and open source.</string>

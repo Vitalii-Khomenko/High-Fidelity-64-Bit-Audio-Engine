@@ -7,6 +7,7 @@
 #include "dsp/Crossfeed.h"
 #include "dsp/LoudnessMeter.h"
 #include "dsp/ParametricEq.h"
+#include "dsp/Resampler.h"
 #include "dsp/TruePeak.h"
 #include "dsp/TruePeakLimiter.h"
 #include "hw/PcmEncoder.h"
@@ -235,6 +236,78 @@ void testPcmEncoder() {
     CHECK_NEAR(mean / q.size(), 0.25, 0.01);
 }
 
+/** Runs src (interleaved stereo) through a resampler in chunks of the given sizes (cycled). */
+std::vector<double> resample(const std::vector<double>& src, uint32_t in, uint32_t out, const std::vector<size_t>& chunks) {
+    dsp::PolyphaseResampler r;
+    CHECK(r.configure(in, out, 2, 512));
+    std::vector<double> result, block(512 * 2);
+    size_t pos = 0, i = 0;
+    while (true) {
+        const size_t want = chunks[i++ % chunks.size()];
+        const auto res = r.process(block.data(), want, [&](double* dst, size_t n) {
+            n = std::min(n, src.size() / 2 - pos);
+            std::copy(src.begin() + pos * 2, src.begin() + (pos + n) * 2, dst);
+            pos += n;
+            return n;
+        });
+        result.insert(result.end(), block.begin(), block.begin() + res.produced * 2);
+        if (res.produced < want) break;  // dry and flushed
+    }
+    CHECK(pos == src.size() / 2);  // every input frame was used
+    return result;
+}
+
+double toneLevel(const std::vector<double>& x, double freq, double rate, size_t skip) {
+    std::vector<double> left(x.size() / 2);
+    for (size_t n = 0; n < left.size(); ++n) left[n] = x[n * 2];
+    return fitSine(left, skip, left.size() - skip, freq, rate);
+}
+
+// Engine-side conversion to the mixer's rate: level, passband, images, aliases, streaming.
+void testResampler() {
+    dsp::PolyphaseResampler probe;
+    CHECK(!probe.configure(48000, 48000, 2, 512));        // nothing to do
+    CHECK(!probe.configure(44100, 48001, 2, 512));        // impractical ratio: left to Oboe
+    CHECK(probe.configure(44100, 48000, 2, 512));
+    const size_t skip = probe.taps() * 2;
+
+    // 1 kHz at 44.1 -> 48 kHz: level exact, everything else 120+ dB down.
+    const size_t frames = 44100;
+    const auto tone = stereoSine(1000.0, 0.5, 0.5, frames, 44100.0);
+    const auto up = resample(tone, 44100, 48000, {512});
+    CHECK(up.size() / 2 >= 48000 && up.size() / 2 < 48000 + probe.taps() * 2);
+    std::vector<double> left(up.size() / 2), residual;
+    for (size_t n = 0; n < left.size(); ++n) left[n] = up[n * 2];
+    // Fit only where the whole filter sees the tone.
+    const size_t end = 48000 - skip;
+    CHECK_NEAR(fitSine(left, skip, end, 1000.0, 48000.0, &residual), 0.5, 0.5e-6);
+    double rms = 0.0;
+    for (size_t n = skip; n < end; ++n) rms += residual[n] * residual[n];
+    rms = std::sqrt(rms / static_cast<double>(end - skip));
+    CHECK(rms < 0.5 * 1e-6);   // < -120 dB re the tone (image at 4.9 kHz included)
+
+    // Passband: flat at 19.9 kHz.
+    const auto high = resample(stereoSine(19900.0, 0.5, 0.5, frames, 44100.0), 44100, 48000, {512});
+    CHECK_NEAR(toneLevel(high, 19900.0, 48000.0, skip), 0.5, 0.5 * 1.2e-4);   // ±0.001 dB
+
+    // 96 -> 48 kHz: a 30 kHz tone must not fold down to 18 kHz.
+    const auto ultra = resample(stereoSine(30000.0, 0.5, 0.5, 96000, 96000.0), 96000, 48000, {512});
+    CHECK(toneLevel(ultra, 18000.0, 48000.0, 2000) < 0.5 * std::pow(10.0, -130.0 / 20.0));
+    const auto keep = resample(stereoSine(15000.0, 0.5, 0.5, 96000, 96000.0), 96000, 48000, {512});
+    CHECK_NEAR(toneLevel(keep, 15000.0, 48000.0, 2000), 0.5, 0.5 * 1.2e-4);
+
+    // Any callback sizes give the same samples.
+    std::mt19937 rng(7);
+    std::vector<size_t> sizes;
+    for (int i = 0; i < 200; ++i) sizes.push_back(1 + rng() % 512);
+    const auto chunked = resample(tone, 44100, 48000, sizes);
+    CHECK(chunked.size() == up.size());
+    for (size_t i = 0; i < up.size(); ++i) CHECK(chunked[i] == up[i]);
+
+    std::puts("  Resampler: 44.1->48 kHz level exact, residual < -120 dB, flat to 19.9 kHz, "
+              "96->48 kHz alias < -130 dB, chunk-size independent");
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     testParametricEq();
@@ -242,8 +315,9 @@ int main() {
     testTruePeak();
     testLimiter();
     testPcmEncoder();
+    testResampler();
     testLoudness();
     testLoudnessScan();
-    std::puts("DSP tests passed: parametric EQ, crossfeed, true peak, limiter, loudness, PCM encoder.");
+    std::puts("DSP tests passed: parametric EQ, crossfeed, true peak, limiter, loudness, PCM encoder, resampler.");
     return 0;
 }

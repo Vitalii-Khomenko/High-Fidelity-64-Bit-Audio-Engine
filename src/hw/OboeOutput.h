@@ -17,6 +17,7 @@
 #include <oboe/Oboe.h>
 
 #include "../core/RingBuffer.h"
+#include "../dsp/Resampler.h"
 #include "PcmEncoder.h"
 
 #define ENGINE_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "AudioEngine", __VA_ARGS__)
@@ -44,6 +45,11 @@ namespace hw {
  * Android 14's bit-perfect mixer attributes). The stream is then opened at
  * exactly that rate and format with every conversion disabled, so a mismatch
  * fails and falls back to the shared mixer instead of resampling silently.
+ *
+ * Shared mode opens the stream at the mixer's own rate. When the file's rate
+ * differs, the callback converts it here (dsp::PolyphaseResampler, 64-bit) so
+ * Android's mixer does not resample. The ring and every frame count stay at
+ * the file's rate; only the callback runs at the device rate.
  */
 class OboeOutput : public oboe::AudioStreamDataCallback {
 public:
@@ -119,7 +125,7 @@ public:
      * stream so the audio path can power down.
      */
     void stop(int fadeMs) {
-        const double frames = std::max(1.0, fadeMs * static_cast<double>(sampleRate()) / 1000.0);
+        const double frames = std::max(1.0, fadeMs * static_cast<double>(deviceRate()) / 1000.0);
         m_fadeOutStep.store(1.0 / frames, std::memory_order_relaxed);
         m_runRequested.store(false, std::memory_order_release);
         bool started;
@@ -179,7 +185,10 @@ public:
     bool isRunRequested() const { return m_runRequested.load(std::memory_order_acquire); }
     /** True when a lost device could not be reopened; cleared by the next successful open. */
     bool hasFailed() const { return m_failed.load(std::memory_order_acquire); }
+    /** The rate of the written audio (the file's rate). */
     uint32_t sampleRate() const { return m_sampleRate.load(std::memory_order_acquire); }
+    /** The rate the device stream runs at; differs from sampleRate() while the engine resamples. */
+    uint32_t deviceRate() const { return m_deviceRate.load(std::memory_order_acquire); }
     int channels() const { return m_channels.load(std::memory_order_acquire); }
     /** True while the stream runs in direct (bit-perfect) mode. */
     bool isDirect() const { return m_direct.load(std::memory_order_acquire); }
@@ -217,6 +226,7 @@ public:
     void flush() {
         if (!m_ring) return;
         m_ring->clear();
+        m_resetResampler.store(true, std::memory_order_release);
         m_writtenFrames.store(m_consumedFrames.load(std::memory_order_acquire), std::memory_order_release);
     }
 
@@ -249,6 +259,7 @@ public:
         const size_t frameBytes = ch * bytesPerSample(enc);
         const size_t total = static_cast<size_t>(std::max<int32_t>(numFrames, 0));
         const bool run = m_runRequested.load(std::memory_order_acquire);
+        if (m_resampler.active() && m_resetResampler.exchange(false, std::memory_order_acq_rel)) m_resampler.reset();
 
         if ((!run && m_fade <= 0.0) || !m_ring) {
             std::memset(out, 0, total * frameBytes);
@@ -271,8 +282,11 @@ public:
                 const size_t left = static_cast<size_t>(std::ceil(m_fade / fadeOutStep));
                 want = std::min(want, std::max<size_t>(left, 1));
             }
-            const size_t got = m_ring->read(m_scratch.data(), want * ch) / ch;
-            if (got > 0) m_consumedFrames.fetch_add(got, std::memory_order_acq_rel);
+            const size_t got = m_resampler.active() ? m_resampler.process(m_scratch.data(), want, [&](double* dst, size_t n) {
+                const size_t read = m_ring->read(dst, n * ch) / ch;
+                if (read > 0) m_consumedFrames.fetch_add(read, std::memory_order_acq_rel);
+                return read;
+            }).produced : readRing(want, ch);
 
             bool fading = false;
             for (size_t f = 0; f < got; ++f) {
@@ -334,6 +348,12 @@ public:
 
 private:
     static constexpr size_t kChunkFrames = 512;
+
+    size_t readRing(size_t frames, size_t ch) {
+        const size_t got = m_ring->read(m_scratch.data(), frames * ch) / ch;
+        if (got > 0) m_consumedFrames.fetch_add(got, std::memory_order_acq_rel);
+        return got;
+    }
     static constexpr int kReconnectAttempts = 50;  // 200 ms apart: 10 s for a device to settle
 
     struct ReconnectSignal {
@@ -371,7 +391,8 @@ private:
     }
 
     /** Opens one stream; direct = exact rate and format with every conversion disabled. */
-    std::shared_ptr<oboe::AudioStream> openStream(int channels, bool direct, SampleEncoding encoding) {
+    /** rate 0: the device's own (mixer) rate, whatever it is. */
+    std::shared_ptr<oboe::AudioStream> openStream(int channels, bool direct, SampleEncoding encoding, uint32_t rate) {
         oboe::AudioStreamBuilder builder;
         builder.setDirection(oboe::Direction::Output)
             ->setPerformanceMode(oboe::PerformanceMode::None)
@@ -382,20 +403,20 @@ private:
             ->setFormatConversionAllowed(!direct)
             ->setChannelCount(channels)
             ->setChannelConversionAllowed(!direct)
-            ->setSampleRate(static_cast<int32_t>(sampleRate()))
             ->setSampleRateConversionQuality(direct ? oboe::SampleRateConversionQuality::None
                                                     : oboe::SampleRateConversionQuality::High)
             ->setDataCallback(this)
             ->setErrorCallback(std::make_shared<ErrorCallback>(m_signal));
+        if (rate > 0) builder.setSampleRate(static_cast<int32_t>(rate));
 
         std::shared_ptr<oboe::AudioStream> stream;
         const oboe::Result result = builder.openStream(stream);
         if (result != oboe::Result::OK || !stream) {
             ENGINE_LOGE("Oboe openStream(%u Hz, %d ch, direct %d) failed: %s",
-                        sampleRate(), channels, direct ? 1 : 0, oboe::convertToText(result));
+                        rate, channels, direct ? 1 : 0, oboe::convertToText(result));
             return nullptr;
         }
-        if (stream->getSampleRate() != static_cast<int32_t>(sampleRate()) ||
+        if ((rate > 0 && stream->getSampleRate() != static_cast<int32_t>(rate)) || stream->getSampleRate() <= 0 ||
             stream->getChannelCount() != channels ||
             stream->getFormat() != oboeFormat(encoding)) {
             ENGINE_LOGE("Oboe returned an unexpected format (%d Hz, %d ch)",
@@ -413,14 +434,32 @@ private:
         bool direct = requested >= static_cast<int>(SampleEncoding::Float) &&
                       requested <= static_cast<int>(SampleEncoding::I32);
         SampleEncoding encoding = direct ? static_cast<SampleEncoding>(requested) : SampleEncoding::Float;
-        std::shared_ptr<oboe::AudioStream> stream = openStream(channels, direct, encoding);
+        std::shared_ptr<oboe::AudioStream> stream = direct ? openStream(channels, true, encoding, sampleRate()) : nullptr;
         if (!stream && direct) {
             ENGINE_LOGI("Direct output refused at %u Hz; using the shared mixer", sampleRate());
             direct = false;
             encoding = SampleEncoding::Float;
-            stream = openStream(channels, false, encoding);
+        }
+        bool resample = false;
+        if (!direct) {
+            // At the mixer's own rate, converting here if the file's rate differs.
+            stream = openStream(channels, false, encoding, 0);
+            if (stream && static_cast<uint32_t>(stream->getSampleRate()) != sampleRate()) {
+                resample = m_resampler.configure(sampleRate(), static_cast<uint32_t>(stream->getSampleRate()),
+                                                 static_cast<size_t>(channels), kChunkFrames);
+                if (!resample) {
+                    // An impractical ratio: let Oboe convert, as before.
+                    stream->close();
+                    stream = openStream(channels, false, encoding, sampleRate());
+                }
+            }
+            if (!stream) stream = openStream(channels, false, encoding, sampleRate());
         }
         if (!stream) return false;
+        if (!resample) m_resampler = dsp::PolyphaseResampler();
+        m_resetResampler.store(false, std::memory_order_release);
+        const uint32_t deviceRate = static_cast<uint32_t>(stream->getSampleRate());
+        m_deviceRate.store(deviceRate, std::memory_order_release);
         m_direct.store(direct, std::memory_order_release);
         m_encoding.store(encoding, std::memory_order_release);
         m_ceiling = direct ? kDirectLimiterCeiling : kLimiterCeiling;
@@ -435,7 +474,7 @@ private:
         }
         m_scratch.assign(kChunkFrames * static_cast<size_t>(channels), 0.0);
         m_lastOut.assign(static_cast<size_t>(channels), 0.0);
-        const double sr = static_cast<double>(sampleRate());
+        const double sr = static_cast<double>(deviceRate);
         m_gainStep = 1.0 / std::max(1.0, 0.03 * sr);
         m_limiterRelease = 1.0 - std::exp(-1.0 / (0.15 * sr));
         m_fadeInStep = 1.0 / std::max(1.0, 0.012 * sr);
@@ -446,8 +485,8 @@ private:
         m_stream = std::move(stream);
         m_started = false;
         m_failed.store(false, std::memory_order_release);
-        ENGINE_LOGI("Oboe stream opened: %u Hz, %d ch, %d-bit%s", sampleRate(), channels,
-                    bitsPerSample(encoding), direct ? ", direct" : "");
+        ENGINE_LOGI("Oboe stream opened: %u Hz (file %u Hz%s), %d ch, %d-bit%s", deviceRate, sampleRate(),
+                    resample ? ", engine SRC" : "", channels, bitsPerSample(encoding), direct ? ", direct" : "");
         return true;
     }
 
@@ -522,6 +561,7 @@ private:
     DirectResolver m_resolver;
     // Written under m_streamMutex while no stream runs; read from any thread.
     std::atomic<uint32_t> m_sampleRate{48000};
+    std::atomic<uint32_t> m_deviceRate{48000};
     std::atomic<int> m_channels{0};
     size_t m_capacityFrames = 0;
 
@@ -530,6 +570,8 @@ private:
     std::vector<double> m_scratch;
     std::vector<double> m_lastOut;
     PcmEncoder m_encoder;
+    dsp::PolyphaseResampler m_resampler;    // active only while the device rate differs
+    std::atomic<bool> m_resetResampler{false};
     double m_ceiling = kLimiterCeiling;
     double m_gainStep = 0.001;
     double m_limiterRelease = 0.0001;
