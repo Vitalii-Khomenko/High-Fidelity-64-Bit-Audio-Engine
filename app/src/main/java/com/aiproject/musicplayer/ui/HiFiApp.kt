@@ -56,7 +56,7 @@ import kotlinx.coroutines.delay
 enum class Tab(val label: Int) { PLAYER(R.string.tab_player), LIBRARY(R.string.tab_library), SOUND(R.string.tab_sound), SETTINGS(R.string.tab_settings) }
 
 @Composable
-fun HiFiApp(service: PlaybackService?, themeMode: ThemeMode, onThemeModeChange: (ThemeMode) -> Unit) {
+fun HiFiApp(service: PlaybackService?, themeMode: ThemeMode, onThemeModeChange: (ThemeMode) -> Unit, playerRequests: Int = 0) {
     HiFiTheme(themeMode) {
         val aw = Aw.colors
         if (service == null) {
@@ -75,7 +75,7 @@ fun HiFiApp(service: PlaybackService?, themeMode: ThemeMode, onThemeModeChange: 
         LaunchedEffect(service) {
             service.messages.collect { snackbar.showSnackbar(it) }
         }
-        AppContent(state, position, service, snackbar, themeMode, onThemeModeChange)
+        AppContent(state, position, service, snackbar, themeMode, onThemeModeChange, playerRequests = playerRequests)
     }
 }
 
@@ -89,9 +89,12 @@ fun AppContent(
     themeMode: ThemeMode,
     onThemeModeChange: (ThemeMode) -> Unit,
     initialTab: Tab = Tab.PLAYER,
+    /** Raised when files were opened from another app: show the player. */
+    playerRequests: Int = 0,
 ) {
     val aw = Aw.colors
     var tab by rememberSaveable { mutableStateOf(initialTab) }
+    LaunchedEffect(playerRequests) { if (playerRequests > 0) tab = Tab.PLAYER }
     BackHandler(enabled = tab != Tab.PLAYER) { tab = Tab.PLAYER }
     Box(Modifier.fillMaxSize().inkBackground(aw)) {
         Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {

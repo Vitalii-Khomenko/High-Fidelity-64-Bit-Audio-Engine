@@ -10,16 +10,20 @@ import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.provider.MediaStore
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.toArgb
+import com.aiproject.musicplayer.playback.ExternalAudio
 import com.aiproject.musicplayer.playback.PlaybackService
+import com.aiproject.musicplayer.playback.Track
 import com.aiproject.musicplayer.ui.HiFiApp
 import com.aiproject.musicplayer.ui.theme.DarkTokens
 import com.aiproject.musicplayer.ui.theme.LightTokens
@@ -34,6 +38,8 @@ class MainActivity : ComponentActivity() {
     private var service by mutableStateOf<PlaybackService?>(null)
     private var themeMode by mutableStateOf(ThemeMode.SYSTEM)
     private var pendingSearch: String? = null   // voice query waiting for the service
+    private var pendingOpen: List<Track>? = null // files opened from another app, waiting for the service
+    private var playerRequests by mutableIntStateOf(0)
     private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
 
     private val connection = object : ServiceConnection {
@@ -42,6 +48,10 @@ class MainActivity : ComponentActivity() {
             pendingSearch?.let { query ->
                 pendingSearch = null
                 service?.playFromSearch(query)
+            }
+            pendingOpen?.let { tracks ->
+                pendingOpen = null
+                service?.setQueue(tracks, 0, true)
             }
         }
 
@@ -57,6 +67,8 @@ class MainActivity : ComponentActivity() {
         applySystemBars(themeMode)
         requestPermissionsOnce(uiPrefs)
         handleVoiceSearch(intent)
+        // Not again when the activity is recreated (rotation): that would restart the file.
+        if (savedInstanceState == null) handleOpen(intent)
         // Bound for the activity's whole life, not just while visible: system
         // pickers (folder chooser) stop this activity, and dropping the service
         // there tore down the UI that was waiting for the picker's result.
@@ -65,6 +77,7 @@ class MainActivity : ComponentActivity() {
             HiFiApp(
                 service = service,
                 themeMode = themeMode,
+                playerRequests = playerRequests,
                 onThemeModeChange = { mode ->
                     themeMode = mode
                     uiPrefs.edit().putInt(KEY_THEME, mode.id).apply()
@@ -77,6 +90,21 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleVoiceSearch(intent)
+        handleOpen(intent)
+    }
+
+    /** "Open with" / "Share" from another app: play those files now and show the player. */
+    private fun handleOpen(intent: Intent?) {
+        val uris = ExternalAudio.uris(intent)
+        if (uris.isEmpty()) return
+        val tracks = ExternalAudio.tracks(contentResolver, uris)
+        if (tracks.isEmpty()) {
+            Toast.makeText(this, R.string.open_unsupported, Toast.LENGTH_SHORT).show()
+            return
+        }
+        playerRequests++
+        val bound = service
+        if (bound != null) bound.setQueue(tracks, 0, true) else pendingOpen = tracks
     }
 
     private fun handleVoiceSearch(intent: Intent?) {

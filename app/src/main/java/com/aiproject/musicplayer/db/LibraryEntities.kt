@@ -70,6 +70,16 @@ data class ArtistRow(
     val coverUri: String,
 )
 
+/** One indexed folder: the files directly in it, whatever their artists and albums. */
+data class FolderRow(
+    val folderUri: String,
+    val name: String,
+    val tracks: Int,
+    val durationMs: Long,
+    val artists: Int,
+    val coverUri: String,
+)
+
 data class FileStampRow(val uri: String, val fileUri: String, val fileSize: Long, val modified: Long)
 
 @Dao
@@ -128,6 +138,19 @@ interface LibraryDao {
         """,
     )
     suspend fun artistTracks(artistKey: String): List<LibraryTrackEntity>
+
+    @Query(
+        """
+        SELECT folderUri, MIN(folder) AS name, COUNT(*) AS tracks, SUM(durationMs) AS durationMs,
+               COUNT(DISTINCT artist) AS artists,
+               COALESCE(MIN(CASE WHEN hasPicture OR folderCover != '' THEN uri END), MIN(uri)) AS coverUri
+        FROM library_tracks GROUP BY folderUri
+        """,
+    )
+    fun folders(): Flow<List<FolderRow>>
+
+    @Query("SELECT * FROM library_tracks WHERE folderUri = :folderUri")
+    suspend fun folderTracks(folderUri: String): List<LibraryTrackEntity>
 
     @Query("SELECT * FROM library_tracks WHERE searchText LIKE :pattern ORDER BY albumArtistName, albumTitle, discNumber, trackNumber LIMIT :limit")
     suspend fun search(pattern: String, limit: Int): List<LibraryTrackEntity>

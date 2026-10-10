@@ -13,6 +13,7 @@ import com.aiproject.musicplayer.playback.PlayableUri
 import com.aiproject.musicplayer.playback.Track
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import java.util.Locale
 
@@ -53,6 +54,32 @@ class LibraryIndex(context: Context) {
     fun albums(): Flow<List<AlbumRow>> = dao.albums()
     fun artists(): Flow<List<ArtistRow>> = dao.artists()
     fun count(): Flow<Int> = dao.count()
+
+    /** An indexed folder with the files directly in it. */
+    data class Folder(
+        val uri: String,
+        val name: String,
+        /** The folders above it ("Music/Mixes"), "" when the provider has no paths. */
+        val parent: String,
+        val tracks: Int,
+        val durationMs: Long,
+        val artists: Int,
+        val coverUri: String,
+    )
+
+    /** Every folder holding tracks, in path order (natural: "2" before "10"). */
+    fun folders(): Flow<List<Folder>> = dao.folders().map { rows ->
+        rows.map { Folder(it.folderUri, it.name, FolderPaths.parent(it.folderUri), it.tracks, it.durationMs, it.artists, it.coverUri) }
+            .sortedWith(compareBy { PlaylistOrdering.naturalSortKey(FolderPaths.path(it.uri).ifEmpty { it.name }) })
+    }
+
+    /** The folder's tracks in file-name order, as a file manager shows them (CUE tracks by number). */
+    suspend fun folderTracks(folderUri: String): List<Track> = dao.folderTracks(folderUri)
+        .sortedWith(
+            compareBy<LibraryTrackEntity> { PlaylistOrdering.naturalSortKey(FolderPaths.fileName(it.fileUri).ifEmpty { it.title }) }
+                .thenBy { it.discNumber }.thenBy { it.trackNumber },
+        )
+        .map(::toTrack)
 
     suspend fun albumTracks(albumKey: String): List<Track> = dao.albumTracks(albumKey).map(::toTrack)
     suspend fun artistTracks(artistKey: String): List<Track> = dao.artistTracks(artistKey).map(::toTrack)

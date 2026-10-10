@@ -144,6 +144,7 @@
     <!-- Library index -->
     <string name="albums">Albums</string>
     <string name="artists">Artists</string>
+    <string name="open_unsupported">This file type cannot be played</string>
     <string name="sources">Sources</string>
     <string name="tracks">Tracks</string>
     <string name="search_library">Search albums, artists, tracks</string>

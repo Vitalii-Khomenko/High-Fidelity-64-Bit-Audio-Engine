@@ -174,6 +174,7 @@ Before treating a build as stable, check:
 8. Library: first indexing of a large folder (progress, time), albums and artists, search in Cyrillic, covers (embedded and `cover.jpg`), adding a file and *Update library*; lock-screen and notification cover; albums with covers in Android Auto.
 12. Bit-perfect USB (Android 14+, a DAC that shows its input rate): turn it on, play 44.1 / 48 / 88.2 / 96 / 192 kHz files and check the DAC display and the *BIT-PERFECT* chip; volume keys change the level; volume below 100 % or EQ shows *PROCESSED*; plug the DAC in and out while playing; turn the setting off while playing (back to *MIXED*, other apps audible again).
 13. Own USB driver (any Android version, any UAC1/UAC2 DAC): turn it on, allow access, play 44.1 / 48 / 96 / 192 kHz and check the DAC display and the *USB DRIVER* chip; pause and resume (no click); a long album for clock drift (no clicks after an hour); unplug while playing (pauses), plug in again; turn the driver off (Android plays to the DAC again). Useful logs: `adb logcat -s AudioEngine`.
+14. Library → Folders: a folder of mixed artists plays in file-name order; search by folder name. A file manager's *Open with* and *Share* (one and several files) start playback and show the player; a `.m3u` is refused. Russian file names and tags display correctly in the English interface.
 
 Useful reports include the phone model, Android version, file format and rate,
 and the exact steps.

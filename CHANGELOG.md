@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.19.0 — 2026-10-10
+
+- **Library → Folders**: every indexed folder with the files directly in it, in file-name order (natural: "2" before "10"), whatever their artists and albums — for mixes, compilations and podcast folders. Path shown under the name, search by name or path, play / shuffle / add.
+- **Open with / Share**: audio files open in the player from a file manager or any app that shares them (one or several files); the player shows and plays them at once. Playlist files and unsupported types are refused with a message.
+- **English only**: the Russian translation of the interface is removed (also library strings, via `resourceConfigurations`). Russian file names, tags (UTF-8 and Windows-1251), CUE sheets and Cyrillic search work as before.
+
 ## 0.18.0 — 2026-10-10
 
 ### Own USB driver (phase 2 of docs/DIRECT_OUTPUT_PLAN.md)
