@@ -2,8 +2,9 @@
 
 ## Limitations
 
-- **Shared-mode output** except for *Bit-perfect USB* on Android 14+ (USB DACs
-  only, where the phone supports it; not yet confirmed on real hardware).
+- **Shared-mode output** except for USB DACs: the *own USB driver* (any
+  Android version) or *Bit-perfect USB* on Android 14+ where the phone supports
+  it; neither confirmed on real hardware yet.
   Android ≤ 13, Bluetooth and the phone's own outputs go through the mixer,
   which applies the system volume and the phone's sound effects. The engine
   converts to the mixer's rate itself (64-bit), so the mixer does not resample. Phase 2 (an own USB Audio
@@ -39,9 +40,10 @@
 
 ## Next steps
 
-1. Confirm phase 1 on a Pixel 8+ with a UAC2 DAC (rates on the DAC display,
-   loop-back bit-exactness) — [DIRECT_OUTPUT_PLAN.md](DIRECT_OUTPUT_PLAN.md).
-2. The own USB driver (phase 2, incl. DoP).
+1. Confirm phases 1 and 2 on real phones and DACs (rates on the DAC display,
+   loop-back bit-exactness, hours-long runs for clock drift) —
+   [DIRECT_OUTPUT_PLAN.md](DIRECT_OUTPUT_PLAN.md).
+2. Own driver: DoP for DSD, hardware volume, implicit feedback.
 3. CUE sheets embedded in FLAC; CUE and lyrics for MediaStore tracks.
 4. A higher-quality music time-stretcher (phase vocoder / WSOLA in double precision).
 5. Instrumented playback tests on CI with an emulator.

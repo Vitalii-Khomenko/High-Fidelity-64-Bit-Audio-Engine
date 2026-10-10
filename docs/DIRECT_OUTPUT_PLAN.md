@@ -1,8 +1,9 @@
 # Direct output plan: getting past the Android mixer
 
 Status: **phase 1 implemented in 0.16.0** (bit-perfect mixer attributes,
-integer output with dither, the path indicator); verified on the host, not yet
-on a real phone and DAC (step 6 below). Phase 2 is planned. This page records
+integer output with dither, the path indicator), **phase 2 in 0.18.0** (own
+UAC1/UAC2 driver, PCM; DoP and hardware volume still to do). Both are verified
+on the host against simulated devices, not yet on real phones and DACs. This page records
 where the audio goes, why "bypassing Android" is not as simple as it sounds, and
 the order in which real bit-perfect output is built.
 
@@ -101,6 +102,26 @@ DAC receives the decoded samples untouched at the track's own rate.
 
 Goal: the original idea of the project, a player that owns the DAC.
 
+Implemented (0.18.0), with one change to the plan: **no libusb**. The driver
+needs only claiming interfaces, a few control requests and isochronous OUT /
+feedback IN transfers, which the kernel's usbfs `ioctl`s (what libusb itself
+uses on Linux) cover in a few hundred lines. That keeps everything MIT, avoids
+vendoring and an LGPL library, and puts the transport behind an interface so
+the whole driver is tested on the host with a simulated DAC.
+
+| Part | File |
+|---|---|
+| UAC1 / UAC2 descriptors: AudioControl, clock source / selector / multiplier, every PCM type I alternate setting, data and feedback endpoints | `src/usb/UacDescriptors.h` |
+| usbfs transport (claim with kernel-driver detach, release with re-attach, control, isochronous URBs, reap via `poll`) | `src/usb/UsbTransport.h` |
+| Rates (UAC2 `GET RANGE` on the clock, UAC1 lists), rate setting, alternate setting, packet schedule in Q16.16, explicit feedback (Q16.16 / Q10.14, unit found against the nominal rate like Linux), 12 × 2 ms transfers from an urgent-audio thread, drain on pause, unplug detection | `src/usb/UacStreamer.h` |
+| Engine: the USB stream is one more device stream of `OboeOutput`, so gain, fades, limiter, dither and conversion are shared; a rate the DAC lacks is converted in 64-bit; a lost DAC falls back without playing on by itself | `src/hw/OboeOutput.h` |
+| App: finding the DAC, permission, hot-plug, settings, indicator (`… · USB DRIVER`), volume keys | `UsbDacDriver.kt`, `PlaybackService.kt` |
+
+Not yet: DoP / native DSD (step 6), hardware volume through the feature unit
+(step 7: software volume with dither is used), implicit feedback (async DACs
+without a feedback endpoint get the nominal rate, which can slip by a sample
+now and then), clock selectors other than their first input.
+
 1. **USB access**: `UsbManager` device list, permission request, a
    `USB_DEVICE_ATTACHED` intent filter with a device filter for audio-class
    interfaces, `openDevice()` → file descriptor.
@@ -144,3 +165,5 @@ Goal: the original idea of the project, a player that owns the DAC.
 1. Phase 1 (bit-perfect mixer attributes) with the honest path indicator.
 2. Integer output and dither (needed by both phases).
 3. Phase 2 (own USB driver), starting with UAC2 PCM, then UAC1, then DoP.
+   UAC2 and UAC1 PCM are done; next DoP and hardware volume, then real-device
+   testing (step 9).

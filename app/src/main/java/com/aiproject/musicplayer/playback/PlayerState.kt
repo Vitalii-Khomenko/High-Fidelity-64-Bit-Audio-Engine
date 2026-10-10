@@ -16,6 +16,8 @@ data class PlayerState(
     val signalPath: SignalPath? = null,
     /** Android 14+ and a connected USB DAC that offers bit-perfect formats. */
     val bitPerfectAvailable: Boolean = false,
+    /** The own USB driver: off, looking for a DAC, waiting for permission, or playing through one. */
+    val usbDriver: UsbDriverState = UsbDriverState.Off,
     val playedUris: Set<String> = emptySet(),
     /** SystemClock.elapsedRealtime() at which the sleep timer pauses, 0 when off. */
     val sleepTimerEndsAt: Long = 0L,

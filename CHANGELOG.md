@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.18.0 — 2026-10-10
+
+### Own USB driver (phase 2 of docs/DIRECT_OUTPUT_PLAN.md)
+
+- **Settings → Signal path → Own USB driver**: the app drives a USB Audio Class 1 or 2 DAC itself, on any Android version and on phones without bit-perfect support: Android's audio is bypassed completely, the file's samples go to the DAC at the file's rate. Android asks once for access; other apps play through the phone's speaker meanwhile.
+- Written from scratch over the kernel's usbfs (no libusb): descriptor parser, rates from the DAC's clock, packet scheduling that follows the DAC's own clock through its feedback endpoint (no drift), 16-bit, 24-bit and 24-in-32-bit formats, drain on pause, unplug detection.
+- A rate the DAC lacks is converted in 64-bit to one it has. Volume is the engine's (64-bit, dither); the volume keys drive it. Unplugging the DAC pauses playback instead of carrying on through the speaker; switching the driver off hands the DAC back to Android.
+- The indicator names it: `BIT-PERFECT 96 kHz / 24-bit · USB DRIVER`.
+- Not yet: DoP (DSD is still converted to PCM), hardware volume, implicit feedback.
+- Tests (`tests/native/usb_tests.cpp`) against a simulated DAC: UAC1 / UAC2 descriptors, rates, setup and release, a DAC clock 80 ppm off followed for 60 s with a 1.7-frame buffer swing (212 frames of drift without feedback), feedback in both formats and from a DAC that reports the wrong unit, bit-exact playback through the player with pause, conversion to a DAC rate, hand-back, unplug while playing.
+
+### Fixes
+
+- DLNA renderer: it could not be switched off reliably and could take the app down with it (work handed to a stopped server threw on a server thread; with the setting saved as on, again on every launch). Stopping is now safe from any thread, never on the main thread, and a start that is switched off half-way stops the server it started.
+
 ## 0.17.0 — 2026-10-10
 
 - **64-bit conversion to the mixer's rate.** In shared mode (speaker, Bluetooth, and USB without bit-perfect) the stream now opens at the mixer's own rate (usually 48 kHz) and the engine converts files at other rates (44.1, 88.2, 96, 192 kHz, DSD) itself, so Android's mixer no longer resamples. Exact rational polyphase filter, Kaiser-windowed sinc in double precision: flat to 20 kHz (±0.001 dB), images and aliases at least 130 dB down, 2 ms delay, about 1–2 % of one core. Ratios that would need an impractically large filter fall back to Oboe's converter.

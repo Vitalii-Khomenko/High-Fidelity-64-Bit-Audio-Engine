@@ -20,6 +20,9 @@ interface PlayerCommands {
 
     /** Bit-perfect output to a USB DAC through Android 14's mixer attributes. */
     fun setBitPerfect(enabled: Boolean)
+
+    /** The app's own USB Audio Class driver: plays to a USB DAC past Android's audio entirely. */
+    fun setOwnUsbDriver(enabled: Boolean)
     fun setAutoAnalyze(enabled: Boolean)
 
     /** Measures every library track without ReplayGain tags (EBU R128), in the background. */

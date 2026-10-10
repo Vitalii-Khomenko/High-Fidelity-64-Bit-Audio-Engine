@@ -324,6 +324,9 @@ public:
 
     /** Direct (bit-perfect) output; see hw::OboeOutput::setDirectResolver. */
     void setDirectOutput(hw::OboeOutput::DirectResolver resolver) { m_output->setDirectResolver(std::move(resolver)); }
+    /** Own USB driver (phase 2): plays through this DAC when it can; nullptr hands it back. */
+    void setUsbDevice(std::shared_ptr<usb::UacStreamer> device) { m_output->setUsbDevice(std::move(device)); }
+    bool isUsbOutput() const { return m_output->isConfigured() && m_output->isUsb(); }
     /** Reopens the output (e.g. the routed device changed), keeping position and queued audio. */
     void reopenOutput() { m_output->requestReopen(); }
     bool isDirectOutput() const { return m_output->isConfigured() && m_output->isDirect(); }

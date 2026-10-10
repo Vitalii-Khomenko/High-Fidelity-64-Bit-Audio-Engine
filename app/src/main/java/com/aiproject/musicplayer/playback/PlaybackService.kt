@@ -164,6 +164,8 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
 
     // Bit-perfect USB output (Android 14+); null on older versions.
     private var bitPerfect: BitPerfectOutput? = null
+    // The own USB driver (phase 2), any Android version.
+    private lateinit var usbDriver: UsbDacDriver
     private var bitPerfectAvailable = false
     private var signalPath: SignalPath? = null
     private var lastProcessedCount = 0
@@ -216,6 +218,11 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         )
         restoreState()
         setupBitPerfect()
+        usbDriver = UsbDacDriver(this, engine, engineExecutor, onState = { publish() }, onLost = {
+            // Like ACTION_AUDIO_BECOMING_NOISY: never carry on through the phone's speaker.
+            if (wantPlaying) pause()
+        })
+        if (settings.ownUsbDriver) usbDriver.enable()
         startMonitor()
         if (settings.renderer) startRenderer()
         // First start after an update (or a cleared index): build the library in the background.
@@ -404,6 +411,7 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         saveResumePoint()
         scope.cancel()
         try { unregisterReceiver(noisyReceiver) } catch (_: Exception) {}
+        usbDriver.disable()   // queued before engine.release() on the engine thread
         bitPerfect?.let { output ->
             audioManager.unregisterAudioDeviceCallback(usbCallback)
             output.enabled = false
@@ -668,6 +676,11 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         }
     }
 
+    override fun setOwnUsbDriver(enabled: Boolean) {
+        updateSettings(settings.copy(ownUsbDriver = enabled))
+        if (enabled) usbDriver.enable() else usbDriver.disable()
+    }
+
     // ── Bit-perfect USB output ───────────────────────────────────────────────
 
     private fun setupBitPerfect() {
@@ -683,6 +696,11 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
         val output = bitPerfect ?: return
         if (devices.none { it.type == AudioDeviceInfo.TYPE_USB_DEVICE || it.type == AudioDeviceInfo.TYPE_USB_HEADSET }) return
         bitPerfectAvailable = output.capableDevice() != null
+        // The own driver taking the DAC makes Android drop it: nothing to reopen for that.
+        if (usbDriver.state is UsbDriverState.Active || usbDriver.state is UsbDriverState.WaitingForPermission) {
+            publish()
+            return
+        }
         // A DAC plugged in while playing: reopen so the stream goes direct (or back to the mixer).
         if (settings.bitPerfect) engineExecutor.execute { engine.reopenOutput() }
         publish()
@@ -1406,6 +1424,7 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
             format = if (loadedUri != null) engine.format() else null,
             signalPath = signalPath,
             bitPerfectAvailable = bitPerfectAvailable,
+            usbDriver = if (::usbDriver.isInitialized) usbDriver.state else UsbDriverState.Off,
             playedUris = playedUris,
             sleepTimerEndsAt = sleepDeadline,
             importing = importing,

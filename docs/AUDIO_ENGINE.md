@@ -9,7 +9,8 @@ src/
   core/AudioBuffer.h        planar double buffer
   core/RingBuffer.h         lock-free SPSC ring with a safe flush
   hw/OboeOutput.h           ring -> [SRC] -> volume/fade/limiter -> PCM encoder -> Oboe stream
-  hw/PcmEncoder.h           float / 16 / 24 / 32-bit device samples, dither only when rounding
+  hw/PcmEncoder.h           float / 16 / 24 / 32 / 24-in-32-bit device samples, dither only when rounding
+  usb/                      own USB Audio Class driver: descriptors, usbfs transport, streamer
   decoders/                 all decoders, container sniffing, duration probe, loudness scan
   tags/                     tag reader (Vorbis comments, ID3, APEv2, MP4, covers)
   dsp/                      parametric EQ, crossfeed, true-peak limiter, loudness meter,
@@ -124,7 +125,14 @@ back to Oboe's converter (`SampleRateConversionQuality::High`).
 **Direct mode** (bit-perfect USB, Android 14+): the app's resolver sets the
 mixer attributes and names the encoding; the stream opens at the file's rate
 with every Oboe conversion disabled and falls back to the shared path when
-refused. Integer output goes through `hw/PcmEncoder.h`. If a multichannel layout cannot be opened the engine
+refused. Integer output goes through `hw/PcmEncoder.h`.
+
+**Own USB driver** (`usb/`): with a `UacStreamer` set, every open tries the DAC
+first. The streamer's thread calls the same render callback as Oboe, so the
+ring, gain, fades, limiter, dither and conversion are shared; a rate the DAC
+lacks is converted to the one `chooseRate` picks. Interfaces stay claimed
+across opens (Android would otherwise get the DAC back between tracks). A DAC
+that fails makes the worker reopen on Oboe without starting. If a multichannel layout cannot be opened the engine
 opens stereo and folds down (`dsp/ChannelMixer.h`: centre and surrounds at
 −3 dB, LFE dropped, normalised).
 

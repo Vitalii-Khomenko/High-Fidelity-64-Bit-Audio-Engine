@@ -28,7 +28,7 @@ object DirectFormatChoice {
 }
 
 /** What actually reaches the device, for the indicator on the player and in settings. */
-data class SignalPath(val kind: Kind, val sampleRate: Int, val bits: Int, val float: Boolean) {
+data class SignalPath(val kind: Kind, val sampleRate: Int, val bits: Int, val float: Boolean, val usb: Boolean = false) {
     enum class Kind {
         /** The DAC receives the file's own samples at the file's rate. */
         BIT_PERFECT,
@@ -58,7 +58,7 @@ data class SignalPath(val kind: Kind, val sampleRate: Int, val bits: Int, val fl
                 !processedRecently
             return SignalPath(
                 if (untouched) Kind.BIT_PERFECT else Kind.DIRECT_PROCESSED,
-                format.outputRate, format.outputBits, format.outputFloat,
+                format.outputRate, format.outputBits, format.outputFloat, format.outputUsb,
             )
         }
     }

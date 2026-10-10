@@ -30,6 +30,7 @@ import com.aiproject.musicplayer.BuildConfig
 import com.aiproject.musicplayer.R
 import com.aiproject.musicplayer.playback.ContentMode
 import com.aiproject.musicplayer.playback.FormatText
+import com.aiproject.musicplayer.playback.UsbDriverState
 import com.aiproject.musicplayer.playback.PlayerCommands
 import com.aiproject.musicplayer.playback.PlayerState
 import com.aiproject.musicplayer.playback.TimeFormat
@@ -120,6 +121,30 @@ fun SettingsScreen(
         if ((format?.underruns ?: 0) > 0) InfoLine(stringResource(R.string.underruns), format!!.underruns.toString())
         Spacer(Modifier.height(6.dp))
         Text(stringResource(R.string.signal_path_hint), style = Aw.small, color = aw.muted)
+        Spacer(Modifier.height(12.dp))
+        Text(stringResource(R.string.usb_driver).uppercase(), style = Aw.navLabel, color = aw.muted)
+        Spacer(Modifier.height(6.dp))
+        Segmented(
+            listOf(false, true), state.settings.ownUsbDriver,
+            label = { stringResource(if (it) R.string.on else R.string.off) },
+            onSelect = commands::setOwnUsbDriver, tone = aw.cyan,
+        )
+        Spacer(Modifier.height(6.dp))
+        when (val usb = state.usbDriver) {
+            UsbDriverState.Off -> Unit
+            UsbDriverState.NoDevice -> Text(stringResource(R.string.usb_driver_no_device), style = Aw.small, color = aw.amber)
+            is UsbDriverState.WaitingForPermission -> Text(stringResource(R.string.usb_driver_waiting, usb.name), style = Aw.small, color = aw.amber)
+            is UsbDriverState.Denied -> Text(stringResource(R.string.usb_driver_denied, usb.name), style = Aw.small, color = aw.amber)
+            is UsbDriverState.Unsupported -> Text(stringResource(R.string.usb_driver_unsupported, usb.name), style = Aw.small, color = aw.amber)
+            is UsbDriverState.Active -> Text(
+                stringResource(
+                    R.string.usb_driver_active, usb.name, usb.info.uacVersion,
+                    FormatText.rate(usb.info.minRate), FormatText.rate(usb.info.maxRate), usb.info.maxBits,
+                ),
+                style = Aw.small, color = aw.cyan,
+            )
+        }
+        Text(stringResource(R.string.usb_driver_hint), style = Aw.small, color = aw.muted)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             Spacer(Modifier.height(12.dp))
             Text(stringResource(R.string.bit_perfect).uppercase(), style = Aw.navLabel, color = aw.muted)

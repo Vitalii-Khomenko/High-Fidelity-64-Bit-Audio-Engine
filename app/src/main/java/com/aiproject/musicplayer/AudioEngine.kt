@@ -25,6 +25,8 @@ data class StreamFormat(
     val outputFloat: Boolean = true,
     /** Wrapping count of output samples the engine had to round (processed); compare successive values. */
     val processedSamples: Int = 0,
+    /** Played through the app's own USB driver (past Android's audio entirely). */
+    val outputUsb: Boolean = false,
 ) {
     /** Same order as decoders::Codec in src/decoders/IAudioDecoder.h. */
     enum class Codec(val label: String, val lossy: Boolean = false) {
@@ -124,6 +126,19 @@ class AudioEngine {
     /** Reopens the device stream, asking the policy again, without losing the position. */
     fun reopenOutput() = nativeReopenOutput(id)
 
+    /** What the own USB driver found on a DAC. */
+    data class UsbDacInfo(val uacVersion: Int, val minRate: Int, val maxRate: Int, val maxBits: Int)
+
+    /**
+     * Own USB driver: plays through the DAC behind [fd] (an open UsbDeviceConnection,
+     * kept open until [clearUsbDevice] returns). Null when it has no usable playback format.
+     */
+    fun setUsbDevice(fd: Int, rawDescriptors: ByteArray): UsbDacInfo? =
+        nativeSetUsbDevice(id, fd, rawDescriptors)?.let { UsbDacInfo(it[0], it[1], it[2], it[3]) }
+
+    /** Hands the DAC back to Android; afterwards the connection may be closed. */
+    fun clearUsbDevice() = nativeClearUsbDevice(id)
+
     fun state(): State = State.entries.getOrElse(nativeGetState(id)) { State.ERROR }
     fun positionMs(): Long = nativeGetPositionMs(id).toLong()
     fun durationMs(): Long = nativeGetDurationMs(id).toLong()
@@ -132,7 +147,7 @@ class AudioEngine {
     fun consumeTrackAdvanced(): Boolean = nativeConsumeTrackAdvanced(id)
 
     fun format(): StreamFormat? {
-        val v = IntArray(14)
+        val v = IntArray(15)
         nativeGetTrackInfo(id, v)
         if (v[0] == 0) return null
         return StreamFormat(
@@ -149,6 +164,7 @@ class AudioEngine {
             outputBits = v[11],
             outputFloat = v[12] != 0,
             processedSamples = v[13],
+            outputUsb = v[14] != 0,
         )
     }
 
@@ -178,6 +194,8 @@ class AudioEngine {
     private external fun nativeSetLimiter(id: Long, enabled: Boolean)
     private external fun nativeSetDirectOutput(id: Long, policy: DirectOutputPolicy?)
     private external fun nativeReopenOutput(id: Long)
+    private external fun nativeSetUsbDevice(id: Long, fd: Int, descriptors: ByteArray): IntArray?
+    private external fun nativeClearUsbDevice(id: Long)
     private external fun nativeGetState(id: Long): Int
     private external fun nativeGetPositionMs(id: Long): Double
     private external fun nativeGetDurationMs(id: Long): Double

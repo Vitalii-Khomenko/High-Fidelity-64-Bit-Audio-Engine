@@ -18,6 +18,7 @@
 
 #include "../core/RingBuffer.h"
 #include "../dsp/Resampler.h"
+#include "../usb/UacStreamer.h"
 #include "PcmEncoder.h"
 
 #define ENGINE_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "AudioEngine", __VA_ARGS__)
@@ -50,7 +51,60 @@ namespace hw {
  * differs, the callback converts it here (dsp::PolyphaseResampler, 64-bit) so
  * Android's mixer does not resample. The ring and every frame count stay at
  * the file's rate; only the callback runs at the device rate.
+ *
+ * Own USB driver: with a usb::UacStreamer set, every open first tries the
+ * DAC directly (phase 2 of docs/DIRECT_OUTPUT_PLAN.md). Its streaming thread
+ * calls the same render callback, so nothing below the ring differs. A rate
+ * the DAC lacks is converted here; a DAC that goes away falls back to Oboe
+ * without starting by itself (the app pauses, as Android does on unplug).
  */
+/** What OboeOutput needs from a running device stream. */
+class DeviceStream {
+public:
+    virtual ~DeviceStream() = default;
+    virtual bool start() = 0;
+    virtual void pause() = 0;
+    virtual void close() = 0;
+    /** False once closed or disconnected. */
+    virtual bool alive() const = 0;
+};
+
+class OboeDeviceStream : public DeviceStream {
+public:
+    explicit OboeDeviceStream(std::shared_ptr<oboe::AudioStream> s) : m_stream(std::move(s)) {}
+    bool start() override { return m_stream->requestStart() == oboe::Result::OK; }
+    void pause() override { m_stream->requestPause(); }
+    void close() override {
+        m_stream->stop();
+        m_stream->close();
+    }
+    bool alive() const override {
+        const oboe::StreamState state = m_stream->getState();
+        return state != oboe::StreamState::Closed && state != oboe::StreamState::Disconnected;
+    }
+private:
+    std::shared_ptr<oboe::AudioStream> m_stream;
+};
+
+class UsbDeviceStream : public DeviceStream {
+public:
+    explicit UsbDeviceStream(std::shared_ptr<usb::UacStreamer> s) : m_streamer(std::move(s)) {}
+    bool start() override { return m_streamer->start(); }
+    void pause() override { m_streamer->pause(); }
+    // The streamer keeps the DAC claimed; OboeOutput releases it when the device is removed.
+    void close() override { m_streamer->pause(); }
+    bool alive() const override { return !m_streamer->failed(); }
+private:
+    std::shared_ptr<usb::UacStreamer> m_streamer;
+};
+
+/** Device format for a USB format: integer, left-justified in its subslot. */
+inline SampleEncoding usbEncoding(const usb::PlaybackFormat& f) {
+    if (f.subslotBytes == 2) return SampleEncoding::I16;
+    if (f.subslotBytes == 3) return SampleEncoding::I24;
+    return f.bits > 24 ? SampleEncoding::I32 : SampleEncoding::I24in32;
+}
+
 class OboeOutput : public oboe::AudioStreamDataCallback {
 public:
     static constexpr size_t kSpectrumSize = 4096;
@@ -108,10 +162,10 @@ public:
         m_runRequested.store(true, std::memory_order_release);
         if (!m_stream && !openLocked(channels())) return false;
         if (m_started) return true;
-        if (m_stream->requestStart() != oboe::Result::OK) {
+        if (!m_stream->start()) {
             // A stale (disconnected) stream: reopen once on the current device.
             closeStreamLocked();
-            if (!openLocked(channels()) || m_stream->requestStart() != oboe::Result::OK) {
+            if (!openLocked(channels()) || !m_stream->start()) {
                 ENGINE_LOGE("Oboe requestStart failed");
                 return false;
             }
@@ -145,7 +199,7 @@ public:
         }
         std::lock_guard<std::mutex> lock(m_streamMutex);
         if (m_stream && m_started && !m_runRequested.load(std::memory_order_acquire)) {
-            m_stream->requestPause();
+            m_stream->pause();
             m_started = false;
         }
     }
@@ -163,6 +217,30 @@ public:
     }
 
     /**
+     * Sets (or clears, with nullptr) the USB DAC driven by the own driver and
+     * reopens the stream on it. When this returns, a removed device is no
+     * longer used (its interfaces are released), so the app may close it.
+     */
+    void setUsbDevice(std::shared_ptr<usb::UacStreamer> device) {
+        bool reopen = false;
+        std::shared_ptr<usb::UacStreamer> old;
+        {
+            std::lock_guard<std::mutex> lock(m_streamMutex);
+            if (m_configured && m_stream) {
+                closeStreamLocked();
+                reopen = true;
+            }
+            old = std::move(m_usb);
+            m_usb = std::move(device);
+            if (old && old != m_usb) old->close();   // interfaces back to Android
+        }
+        if (reopen) signalReopen();
+    }
+
+    /** True while the stream plays through the own USB driver. */
+    bool isUsb() const { return m_usbActive.load(std::memory_order_acquire); }
+
+    /**
      * Closes the stream and lets the worker open it again (resolver asked
      * anew, ring kept). For output-device changes and mode switches.
      */
@@ -172,12 +250,7 @@ public:
             if (!m_configured || !m_stream) return;
             closeStreamLocked();
         }
-        {
-            std::lock_guard<std::mutex> lock(m_signal->mutex);
-            if (!m_signal->alive) return;
-            m_signal->pending = true;
-        }
-        m_signal->cv.notify_one();
+        signalReopen();
     }
 
     /** Lock-free: queries from the UI must not wait for a stream being opened. */
@@ -349,6 +422,41 @@ public:
 private:
     static constexpr size_t kChunkFrames = 512;
 
+    void signalReopen() {
+        {
+            std::lock_guard<std::mutex> lock(m_signal->mutex);
+            if (!m_signal->alive) return;
+            m_signal->pending = true;
+        }
+        m_signal->cv.notify_one();
+    }
+
+    /** Opens the own-driver USB stream at the best rate for the source. */
+    std::unique_ptr<DeviceStream> openUsb(int channels, uint32_t& deviceRate, SampleEncoding& encoding) {
+        if (!m_usb || m_usb->failed()) return nullptr;
+        const uint32_t rate = m_usb->chooseRate(sampleRate(), channels);
+        if (rate == 0) return nullptr;
+        // A rate the DAC lacks is converted here; one that cannot be is not used.
+        if (rate != sampleRate() &&
+            !m_resampler.configure(sampleRate(), rate, static_cast<size_t>(channels), kChunkFrames)) return nullptr;
+        auto signal = m_signal;
+        const usb::PlaybackFormat* format = m_usb->open(
+            rate, channels,
+            [this](uint8_t* out, size_t frames) { onAudioReady(nullptr, out, static_cast<int32_t>(frames)); },
+            [signal] {
+                {
+                    std::lock_guard<std::mutex> lock(signal->mutex);
+                    if (!signal->alive) return;
+                    signal->pending = true;
+                }
+                signal->cv.notify_one();
+            });
+        if (!format) return nullptr;
+        deviceRate = rate;
+        encoding = usbEncoding(*format);
+        return std::make_unique<UsbDeviceStream>(m_usb);
+    }
+
     size_t readRing(size_t frames, size_t ch) {
         const size_t got = m_ring->read(m_scratch.data(), frames * ch) / ch;
         if (got > 0) m_consumedFrames.fetch_add(got, std::memory_order_acq_rel);
@@ -429,38 +537,54 @@ private:
 
     bool openLocked(int channels) {
         closeStreamLocked();
-        // The app sets the device's mixer attributes in the resolver, before the open.
-        const int requested = m_resolver ? m_resolver(sampleRate(), channels) : -1;
-        bool direct = requested >= static_cast<int>(SampleEncoding::Float) &&
-                      requested <= static_cast<int>(SampleEncoding::I32);
-        SampleEncoding encoding = direct ? static_cast<SampleEncoding>(requested) : SampleEncoding::Float;
-        std::shared_ptr<oboe::AudioStream> stream = direct ? openStream(channels, true, encoding, sampleRate()) : nullptr;
-        if (!stream && direct) {
-            ENGINE_LOGI("Direct output refused at %u Hz; using the shared mixer", sampleRate());
-            direct = false;
-            encoding = SampleEncoding::Float;
+        m_resampler = dsp::PolyphaseResampler();
+        std::unique_ptr<DeviceStream> stream;
+        uint32_t deviceRate = 0;
+        SampleEncoding encoding = SampleEncoding::Float;
+        bool direct = false;
+        bool usbActive = false;
+
+        // 1. The own USB driver.
+        if ((stream = openUsb(channels, deviceRate, encoding))) {
+            direct = usbActive = true;
         }
-        bool resample = false;
-        if (!direct) {
-            // At the mixer's own rate, converting here if the file's rate differs.
-            stream = openStream(channels, false, encoding, 0);
-            if (stream && static_cast<uint32_t>(stream->getSampleRate()) != sampleRate()) {
-                resample = m_resampler.configure(sampleRate(), static_cast<uint32_t>(stream->getSampleRate()),
-                                                 static_cast<size_t>(channels), kChunkFrames);
-                if (!resample) {
-                    // An impractical ratio: let Oboe convert, as before.
-                    stream->close();
-                    stream = openStream(channels, false, encoding, sampleRate());
+        // 2. Android 14 bit-perfect: the app sets the mixer attributes in the resolver.
+        if (!stream) {
+            const int requested = m_resolver ? m_resolver(sampleRate(), channels) : -1;
+            if (requested >= static_cast<int>(SampleEncoding::Float) && requested <= static_cast<int>(SampleEncoding::I32)) {
+                encoding = static_cast<SampleEncoding>(requested);
+                if (auto s = openStream(channels, true, encoding, sampleRate())) {
+                    deviceRate = static_cast<uint32_t>(s->getSampleRate());
+                    stream = std::make_unique<OboeDeviceStream>(std::move(s));
+                    direct = true;
+                } else {
+                    ENGINE_LOGI("Direct output refused at %u Hz; using the shared mixer", sampleRate());
                 }
             }
-            if (!stream) stream = openStream(channels, false, encoding, sampleRate());
         }
-        if (!stream) return false;
+        // 3. Shared: at the mixer's own rate (converted here), or Oboe converts.
+        if (!stream) {
+            m_resampler = dsp::PolyphaseResampler();
+            encoding = SampleEncoding::Float;
+            auto s = openStream(channels, false, encoding, 0);
+            if (s && static_cast<uint32_t>(s->getSampleRate()) != sampleRate() &&
+                !m_resampler.configure(sampleRate(), static_cast<uint32_t>(s->getSampleRate()),
+                                       static_cast<size_t>(channels), kChunkFrames)) {
+                // An impractical ratio: let Oboe convert, as before.
+                s->close();
+                s = nullptr;
+            }
+            if (!s) s = openStream(channels, false, encoding, sampleRate());
+            if (!s) return false;
+            deviceRate = static_cast<uint32_t>(s->getSampleRate());
+            stream = std::make_unique<OboeDeviceStream>(std::move(s));
+        }
+        const bool resample = deviceRate != sampleRate() && m_resampler.active();
         if (!resample) m_resampler = dsp::PolyphaseResampler();
         m_resetResampler.store(false, std::memory_order_release);
-        const uint32_t deviceRate = static_cast<uint32_t>(stream->getSampleRate());
         m_deviceRate.store(deviceRate, std::memory_order_release);
         m_direct.store(direct, std::memory_order_release);
+        m_usbActive.store(usbActive, std::memory_order_release);
         m_encoding.store(encoding, std::memory_order_release);
         m_ceiling = direct ? kDirectLimiterCeiling : kLimiterCeiling;
         if (channels != this->channels() || !m_ring) {
@@ -485,18 +609,19 @@ private:
         m_stream = std::move(stream);
         m_started = false;
         m_failed.store(false, std::memory_order_release);
-        ENGINE_LOGI("Oboe stream opened: %u Hz (file %u Hz%s), %d ch, %d-bit%s", deviceRate, sampleRate(),
-                    resample ? ", engine SRC" : "", channels, bitsPerSample(encoding), direct ? ", direct" : "");
+        ENGINE_LOGI("Stream opened: %u Hz (file %u Hz%s), %d ch, %d-bit%s", deviceRate, sampleRate(),
+                    resample ? ", engine SRC" : "", channels, bitsPerSample(encoding),
+                    usbActive ? ", own USB driver" : direct ? ", direct" : "");
         return true;
     }
 
     void closeStreamLocked() {
         if (m_stream) {
-            m_stream->stop();
             m_stream->close();
             m_stream.reset();
         }
         m_started = false;
+        m_usbActive.store(false, std::memory_order_release);
     }
 
     void closeLocked() {
@@ -519,21 +644,20 @@ private:
                 {
                     std::lock_guard<std::mutex> lock(m_streamMutex);
                     if (!m_configured) { reopened = true; break; }
-                    if (m_stream) {
-                        const oboe::StreamState state = m_stream->getState();
-                        if (state != oboe::StreamState::Closed && state != oboe::StreamState::Disconnected) {
-                            reopened = true;  // already replaced by configure()/start()
-                            break;
-                        }
+                    if (m_stream && m_stream->alive()) {
+                        reopened = true;  // already replaced by configure()/start()
+                        break;
                     }
+                    // A lost USB DAC must not continue on the phone's speaker by itself.
+                    const bool lostUsb = m_stream && m_usbActive.load(std::memory_order_acquire);
                     // Reopen with the same format so pitch and channel layout
                     // stay correct; Oboe resamples if the new device differs.
                     // Recovered only once the stream is open and, if playback
                     // was running, actually started again.
                     if (openLocked(channels())) {
-                        if (!m_runRequested.load(std::memory_order_acquire)) {
+                        if (!m_runRequested.load(std::memory_order_acquire) || lostUsb) {
                             reopened = true;
-                        } else if (m_stream->requestStart() == oboe::Result::OK) {
+                        } else if (m_stream->start()) {
                             m_started = true;
                             reopened = true;
                         } else {
@@ -555,7 +679,8 @@ private:
 
     // Stream ownership (control threads, guarded by m_streamMutex).
     mutable std::mutex m_streamMutex;
-    std::shared_ptr<oboe::AudioStream> m_stream;
+    std::unique_ptr<DeviceStream> m_stream;
+    std::shared_ptr<usb::UacStreamer> m_usb;
     std::atomic<bool> m_configured{false};
     bool m_started = false;
     DirectResolver m_resolver;
@@ -584,6 +709,7 @@ private:
 
     std::atomic<bool> m_failed{false};
     std::atomic<bool> m_direct{false};
+    std::atomic<bool> m_usbActive{false};
     std::atomic<SampleEncoding> m_encoding{SampleEncoding::Float};
     std::atomic<uint64_t> m_inexact{0};
     std::atomic<bool> m_runRequested{false};

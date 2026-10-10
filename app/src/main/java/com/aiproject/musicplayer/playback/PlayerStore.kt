@@ -23,6 +23,8 @@ data class PlayerSettings(
     val renderer: Boolean = false,
     /** Bit-perfect output to a USB DAC (Android 14+, when the device supports it). */
     val bitPerfect: Boolean = false,
+    /** The app's own USB Audio Class driver for USB DACs (any Android version). */
+    val ownUsbDriver: Boolean = false,
 )
 
 data class SavedQueue(
@@ -59,6 +61,7 @@ class PlayerStore(context: Context) {
         autoAnalyze = prefs.getBoolean(KEY_AUTO_ANALYZE, true),
         renderer = prefs.getBoolean(KEY_RENDERER, false),
         bitPerfect = prefs.getBoolean(KEY_BIT_PERFECT, false),
+        ownUsbDriver = prefs.getBoolean(KEY_OWN_USB_DRIVER, false),
     )
 
     fun saveSettings(s: PlayerSettings) {
@@ -79,6 +82,7 @@ class PlayerStore(context: Context) {
             .putBoolean(KEY_AUTO_ANALYZE, s.autoAnalyze)
             .putBoolean(KEY_RENDERER, s.renderer)
             .putBoolean(KEY_BIT_PERFECT, s.bitPerfect)
+            .putBoolean(KEY_OWN_USB_DRIVER, s.ownUsbDriver)
             .apply()
     }
 
@@ -170,6 +174,7 @@ class PlayerStore(context: Context) {
         private const val KEY_AUTO_ANALYZE = "loudness_auto_analyze"
         private const val KEY_RENDERER = "dlna_renderer"
         private const val KEY_BIT_PERFECT = "bit_perfect_usb"
+        private const val KEY_OWN_USB_DRIVER = "own_usb_driver"
 
         fun encodeTracks(tracks: List<Track>): String = JSONArray().apply {
             tracks.forEach { t ->

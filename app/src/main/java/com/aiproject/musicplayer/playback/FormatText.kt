@@ -35,6 +35,7 @@ object FormatText {
         val mix = if (format.outputChannels in 1 until format.channels) " · stereo mix" else ""
         val sample = if (format.outputFloat) "float" else "${format.outputBits}-bit"
         val route = when {
+            format.outputUsb -> "own USB driver"
             format.outputDirect -> "direct"
             // Converted in the engine (64-bit) to the mixer's own rate.
             format.outputRate != format.sampleRate -> "64-bit SRC · mixer"
@@ -46,9 +47,10 @@ object FormatText {
     /** "BIT-PERFECT 96 kHz / 24-bit", "DIRECT 96 kHz / 24-bit · PROCESSED", "MIXER 48 kHz". */
     fun path(path: SignalPath): String {
         val sample = if (path.float) "32-bit float" else "${path.bits}-bit"
+        val driver = if (path.usb) " · USB DRIVER" else ""
         return when (path.kind) {
-            SignalPath.Kind.BIT_PERFECT -> "BIT-PERFECT ${rate(path.sampleRate)} / $sample"
-            SignalPath.Kind.DIRECT_PROCESSED -> "DIRECT ${rate(path.sampleRate)} / $sample · PROCESSED"
+            SignalPath.Kind.BIT_PERFECT -> "BIT-PERFECT ${rate(path.sampleRate)} / $sample$driver"
+            SignalPath.Kind.DIRECT_PROCESSED -> "DIRECT ${rate(path.sampleRate)} / $sample · PROCESSED$driver"
             // The stream runs at the mixer's own rate; the engine converts to it.
             SignalPath.Kind.MIXED -> "MIXER ${rate(path.sampleRate)}"
         }

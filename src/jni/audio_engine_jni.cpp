@@ -1,5 +1,6 @@
 #include <jni.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cmath>
@@ -8,6 +9,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 #include <unistd.h>
 
 #include "../core/AudioPlayer.h"
@@ -45,7 +47,7 @@ struct Instance {
     }
 };
 
-constexpr jsize kTrackInfoSize = 14;
+constexpr jsize kTrackInfoSize = 15;
 
 std::mutex g_mutex;
 std::unordered_map<jlong, std::shared_ptr<Instance>> g_instances;
@@ -308,6 +310,41 @@ Java_com_aiproject_musicplayer_AudioEngine_nativeSetDirectOutput(JNIEnv* env, jo
     p->setDirectOutput([shared](uint32_t rate, int channels) { return shared->encodingFor(rate, channels); });
 }
 
+/**
+ * Own USB driver: fd from UsbDeviceConnection (the app keeps the connection
+ * open until nativeClearUsbDevice returns), descriptors from getRawDescriptors().
+ * Returns [uacVersion, minRate, maxRate, maxBits] for stereo, or null when the
+ * device has no usable playback format.
+ */
+JNIEXPORT jintArray JNICALL
+Java_com_aiproject_musicplayer_AudioEngine_nativeSetUsbDevice(JNIEnv* env, jobject, jlong id, jint fd, jbyteArray descriptors) {
+    auto p = player(id);
+    if (!p || fd < 0 || !descriptors) return nullptr;
+    const jsize size = env->GetArrayLength(descriptors);
+    std::vector<uint8_t> bytes(static_cast<size_t>(size));
+    env->GetByteArrayRegion(descriptors, 0, size, reinterpret_cast<jbyte*>(bytes.data()));
+    auto device = audio_engine::usb::parseUac(bytes.data(), bytes.size());
+    if (device.version == 0 || device.formats.empty()) return nullptr;
+    int maxBits = 0;
+    for (const auto& f : device.formats) if (f.channels == 2) maxBits = std::max<int>(maxBits, f.bits);
+    auto streamer = std::make_shared<audio_engine::usb::UacStreamer>(
+        std::make_unique<audio_engine::usb::UsbfsTransport>(fd), std::move(device));
+    const auto rates = streamer->rates(2);
+    if (rates.empty()) return nullptr;   // releases the DAC again
+    const jint info[4] = {streamer->device().version, static_cast<jint>(rates.front()),
+                          static_cast<jint>(rates.back()), maxBits};
+    p->setUsbDevice(std::move(streamer));
+    jintArray out = env->NewIntArray(4);
+    if (out) env->SetIntArrayRegion(out, 0, 4, info);
+    return out;
+}
+
+/** Stops using the DAC and hands it back to Android; the app may close the connection afterwards. */
+JNIEXPORT void JNICALL
+Java_com_aiproject_musicplayer_AudioEngine_nativeClearUsbDevice(JNIEnv*, jobject, jlong id) {
+    if (auto p = player(id)) p->setUsbDevice(nullptr);
+}
+
 JNIEXPORT void JNICALL
 Java_com_aiproject_musicplayer_AudioEngine_nativeReopenOutput(JNIEnv*, jobject, jlong id) {
     if (auto p = player(id)) p->reopenOutput();
@@ -345,7 +382,7 @@ Java_com_aiproject_musicplayer_AudioEngine_nativeConsumeTrackAdvanced(JNIEnv*, j
 /**
  * out: [sampleRate, channels, bitsPerSample, dsdRate, codec, outputRate,
  *       outputChannels, gainCentiDb, serialLow32, underruns, outputDirect,
- *       outputBits, outputFloat, processedSamplesLow31]
+ *       outputBits, outputFloat, processedSamplesLow31, outputUsb]
  */
 JNIEXPORT void JNICALL
 Java_com_aiproject_musicplayer_AudioEngine_nativeGetTrackInfo(JNIEnv* env, jobject, jlong id, jintArray out) {
@@ -368,6 +405,7 @@ Java_com_aiproject_musicplayer_AudioEngine_nativeGetTrackInfo(JNIEnv* env, jobje
         values[12] = p->outputIsFloat() ? 1 : 0;
         // A counter that wraps: the app compares successive values.
         values[13] = static_cast<jint>(p->inexactOutputSamples() & 0x7fffffff);
+        values[14] = p->isUsbOutput() ? 1 : 0;
     }
     const jsize n = std::min<jsize>(env->GetArrayLength(out), kTrackInfoSize);
     env->SetIntArrayRegion(out, 0, n, values);

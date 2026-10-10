@@ -83,6 +83,16 @@ without dither while 0.3 is dithered and reported, a refused format falls back
 to the float mixer stream, the app is asked again on a rate change across
 tracks, and leaving direct mode while playing keeps the position.
 
+`usb_tests.cpp` drives the own USB driver against a simulated DAC (its own
+clock, feedback endpoint, control requests, unplug): UAC2 and UAC1 descriptors,
+rates from clock ranges and the packet-size limit, rate and alternate setting
+requests, interfaces kept across tracks and handed back, feedback in Q16.16
+(high speed) and Q10.14 (full speed) and from a DAC reporting in the wrong unit,
+a DAC 80 ppm fast for 60 s without drift, UAC1 payload sample for sample, and
+the player playing through it bit-exact with a pause (no queued audio cut off),
+converting to a rate the DAC has, handing the DAC back, and an unplug while
+playing that does not continue on the speaker.
+
 `dsp_tests.cpp` checks the engine's sample-rate converter (44.1 → 48 kHz level
 and residual below −120 dB, flat at 19.9 kHz, a 30 kHz tone at 96 kHz kept
 130 dB below 18 kHz after 96 → 48 kHz, the same samples for any callback size)
@@ -163,6 +173,7 @@ Before treating a build as stable, check:
 9. Sound: an AutoEQ profile for your headphones (search, apply, switch back to 5 bands), crossfeed presets with headphones, *Measure library* on a few albums without tags and their level against tagged ones, the limiter with EQ boosts.
 8. Library: first indexing of a large folder (progress, time), albums and artists, search in Cyrillic, covers (embedded and `cover.jpg`), adding a file and *Update library*; lock-screen and notification cover; albums with covers in Android Auto.
 12. Bit-perfect USB (Android 14+, a DAC that shows its input rate): turn it on, play 44.1 / 48 / 88.2 / 96 / 192 kHz files and check the DAC display and the *BIT-PERFECT* chip; volume keys change the level; volume below 100 % or EQ shows *PROCESSED*; plug the DAC in and out while playing; turn the setting off while playing (back to *MIXED*, other apps audible again).
+13. Own USB driver (any Android version, any UAC1/UAC2 DAC): turn it on, allow access, play 44.1 / 48 / 96 / 192 kHz and check the DAC display and the *USB DRIVER* chip; pause and resume (no click); a long album for clock drift (no clicks after an hour); unplug while playing (pauses), plug in again; turn the driver off (Android plays to the DAC again). Useful logs: `adb logcat -s AudioEngine`.
 
 Useful reports include the phone model, Android version, file format and rate,
 and the exact steps.

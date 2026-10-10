@@ -123,6 +123,13 @@
     <string name="bit_perfect">Bit-perfect USB</string>
     <string name="bit_perfect_hint">Sends the file\'s own samples to a USB DAC at the file\'s rate, past Android\'s mixer (Android 14+, if the phone supports it). The system volume does not apply: the volume keys and the app\'s slider set the level, so start low. Other apps\' sounds are muted on the DAC meanwhile. Volume below 100 %, EQ, ReplayGain, crossfeed, speed and the limiter catching a peak make the output \"processed\".</string>
     <string name="bit_perfect_unavailable">No USB DAC with bit-perfect support is connected.</string>
+    <string name="usb_driver">Own USB driver</string>
+    <string name="usb_driver_hint">The app drives a USB DAC itself, past Android\'s audio entirely, on any Android version: the file\'s own samples at its own rate (a rate the DAC lacks is converted in 64-bit). Android asks once for access to the DAC. Meanwhile other apps play through the phone\'s speaker, and the volume keys and the app\'s slider set the level, so start low. Takes priority over “Bit-perfect USB”.</string>
+    <string name="usb_driver_no_device">No USB audio device connected.</string>
+    <string name="usb_driver_waiting">Waiting for access to %1$s…</string>
+    <string name="usb_driver_denied">Access to %1$s was refused. Turn the driver off and on to ask again.</string>
+    <string name="usb_driver_unsupported">%1$s has no playback format the driver can use; Android plays to it as usual.</string>
+    <string name="usb_driver_active">%1$s · USB Audio %2$d.0 · %3$s – %4$s · up to %5$d-bit</string>
     <string name="device_speaker">Built-in</string>
     <string name="underruns">Underruns</string>
     <string name="signal_path_hint">In shared mode Android mixes all apps at its own rate (usually 48 kHz). The engine converts other rates to it itself in 64-bit, so the mixer does not resample; the system volume and the phone\'s sound effects still apply. DSD is converted to PCM in the engine.</string>

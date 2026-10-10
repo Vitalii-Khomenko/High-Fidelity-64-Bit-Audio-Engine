@@ -79,6 +79,15 @@ class SignalPathTest {
         assertEquals(processed, kind(format(), processed = true))
     }
 
+    @Test fun `the own USB driver is named on the path`() {
+        val usb = format(rate = 44_100).copy(outputUsb = true, outputBits = 24)
+        assertEquals("BIT-PERFECT 44.1 kHz / 24-bit · USB DRIVER", FormatText.path(SignalPath.of(usb, flat, 1.0, false)!!))
+        assertEquals("Out 44.1 kHz 24-bit · own USB driver", FormatText.output(usb))
+        // A rate the DAC lacks is converted: direct, but not the file's samples.
+        val converted = usb.copy(outputRate = 48_000)
+        assertEquals("DIRECT 48 kHz / 24-bit · PROCESSED · USB DRIVER", FormatText.path(SignalPath.of(converted, flat, 1.0, false)!!))
+    }
+
     @Test fun `no output means no path`() =
         assertNull(SignalPath.of(format().copy(outputRate = 0), flat, 1.0, false))
 

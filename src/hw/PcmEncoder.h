@@ -9,7 +9,10 @@ namespace audio_engine {
 namespace hw {
 
 /** Sample format of the device stream. Ids are shared with Kotlin (BitPerfectOutput). */
-enum class SampleEncoding : int { Float = 0, I16 = 1, I24 = 2, I32 = 3 };
+enum class SampleEncoding : int {
+    Float = 0, I16 = 1, I24 = 2, I32 = 3,
+    I24in32 = 4,   // 24-bit samples left-justified in 32-bit slots (USB DACs); native only
+};
 
 inline size_t bytesPerSample(SampleEncoding e) {
     switch (e) {
@@ -22,7 +25,8 @@ inline size_t bytesPerSample(SampleEncoding e) {
 inline int bitsPerSample(SampleEncoding e) {
     switch (e) {
         case SampleEncoding::I16: return 16;
-        case SampleEncoding::I24: return 24;
+        case SampleEncoding::I24:
+        case SampleEncoding::I24in32: return 24;
         default: return 32;
     }
 }
@@ -43,6 +47,7 @@ public:
             case SampleEncoding::I16: return encodeInt<int16_t, 2>(in, samples, out, 32768.0);
             case SampleEncoding::I24: return encodeInt<int32_t, 3>(in, samples, out, 8388608.0);
             case SampleEncoding::I32: return encodeInt<int32_t, 4>(in, samples, out, 2147483648.0);
+            case SampleEncoding::I24in32: return encodeInt<int32_t, 4, 8>(in, samples, out, 8388608.0);
             default: break;
         }
         float* o = static_cast<float*>(out);
@@ -55,7 +60,7 @@ public:
     }
 
 private:
-    template <typename T, size_t Bytes>
+    template <typename T, size_t Bytes, int Shift = 0>
     size_t encodeInt(const double* in, size_t samples, void* out, double scale) {
         const double lo = -scale;
         const double hi = scale - 1.0;
@@ -68,7 +73,7 @@ private:
                 v = std::nearbyint(v + tpdf());
             }
             v = v < lo ? lo : (v > hi ? hi : v);
-            const auto s = static_cast<int32_t>(v);
+            const auto s = static_cast<int32_t>(static_cast<uint32_t>(static_cast<int32_t>(v)) << Shift);
             if (Bytes == 3) {
                 o[i * 3] = static_cast<uint8_t>(s);
                 o[i * 3 + 1] = static_cast<uint8_t>(s >> 8);

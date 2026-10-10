@@ -71,6 +71,7 @@ c++ $flags $san tests/native/decoder_tests.cpp "$work/sonic.o" $tp_libs -o "$wor
 c++ $flags $san tests/native/format_tests.cpp $tp_libs -o "$work/format_tests" -lm
 c++ $flags $san tests/native/dsp_tests.cpp $tp_libs -o "$work/dsp_tests" -lm
 c++ $flags $san tests/native/player_tests.cpp "$work/sonic.o" $tp_libs -o "$work/player_tests" -lm
+c++ $flags $san tests/native/usb_tests.cpp "$work/sonic.o" $tp_libs -o "$work/usb_tests" -lm
 
 if command -v sox >/dev/null && command -v flac >/dev/null && command -v lame >/dev/null; then
     sox -n -r 44100 -c 2 -b 16 "$work/tone.wav" synth 1.2 sine 440 vol 0.25
@@ -93,10 +94,13 @@ else
 fi
 "$work/dsp_tests"
 "$work/player_tests"
+"$work/usb_tests"
 
 if [[ "${TSAN:-0}" == "1" ]]; then
     cc -O1 -g -fsanitize=thread -c src/third_party/sonic/sonic.c -o "$work/sonic-tsan.o"
     c++ $flags -fsanitize=thread tests/native/player_tests.cpp "$work/sonic-tsan.o" $tp_libs \
         -o "$work/player_tests_tsan" -lm
     TSAN_OPTIONS=halt_on_error=1 "$work/player_tests_tsan"
+    c++ $flags -fsanitize=thread tests/native/usb_tests.cpp "$work/sonic-tsan.o" $tp_libs -o "$work/usb_tests_tsan" -lm
+    TSAN_OPTIONS=halt_on_error=1 "$work/usb_tests_tsan"
 fi
