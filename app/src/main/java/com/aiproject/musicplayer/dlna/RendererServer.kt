@@ -9,6 +9,7 @@ import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.MulticastSocket
+import java.util.concurrent.RejectedExecutionException
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
@@ -68,6 +69,7 @@ class RendererServer(
     /** Starts serving on the Wi-Fi address. False when there is no local network. */
     fun start(): Boolean {
         if (running.get()) return true
+        if (pool.isShutdown) return false   // stopped instances are not reused
         val ip = bindAddress ?: localAddress() ?: return false
         address = ip
         val socket = ServerSocket()
@@ -75,14 +77,15 @@ class RendererServer(
         socket.bind(InetSocketAddress(ip, 0))
         server = socket
         running.set(true)
-        pool.execute { acceptLoop(socket) }
+        submit { acceptLoop(socket) }
         if (discovery) {
-            pool.execute { ssdpLoop() }
-            pool.execute { announceLoop() }
+            submit { ssdpLoop() }
+            submit { announceLoop() }
         }
         return true
     }
 
+    /** Safe from any thread and more than once; the instance cannot be started again. */
     fun stop() {
         if (!running.getAndSet(false)) return
         if (discovery) runCatching { announce("ssdp:byebye") }
@@ -90,6 +93,18 @@ class RendererServer(
         runCatching { ssdp?.close() }
         subscribers.clear()
         pool.shutdownNow()
+    }
+
+    /**
+     * Runs work on the server's threads. After stop() the pool refuses work;
+     * that must never surface as an exception (an uncaught one on a server
+     * thread would kill the app).
+     */
+    private fun submit(task: () -> Unit): Boolean = try {
+        pool.execute(task)
+        true
+    } catch (_: RejectedExecutionException) {
+        false
     }
 
     /** Tells subscribers what changed (call after transport, track or volume changes). */
@@ -100,11 +115,11 @@ class RendererServer(
         val rcs = RendererProtocol.rcsState(status)
         if (avt != lastAvt) {
             lastAvt = avt
-            pool.execute { publish("AVTransport", avt) }
+            submit { publish("AVTransport", avt) }
         }
         if (rcs != lastRcs) {
             lastRcs = rcs
-            pool.execute { publish("RenderingControl", rcs) }
+            submit { publish("RenderingControl", rcs) }
         }
     }
 
@@ -120,7 +135,7 @@ class RendererServer(
             } catch (_: Exception) {
                 break
             }
-            pool.execute { client.use { handle(it) } }
+            if (!submit { client.use { handle(it) } }) runCatching { client.close() }
         }
     }
 
@@ -221,7 +236,7 @@ class RendererServer(
             "RenderingControl" -> RendererProtocol.rcsState(status)
             else -> return
         }
-        pool.execute { send(sid, RendererProtocol.lastChange(service, values)) }
+        submit { send(sid, RendererProtocol.lastChange(service, values)) }
     }
 
     private fun publish(service: String, values: List<Pair<String, String>>) {

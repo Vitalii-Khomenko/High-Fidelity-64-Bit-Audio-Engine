@@ -2,6 +2,7 @@ package com.aiproject.musicplayer.dlna
 
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.HttpURLConnection
@@ -53,6 +54,20 @@ class RendererServerTest {
                 .associate { it.substringBefore(':').trim().uppercase() to it.substringAfter(':').trim() }
             return code to (hdrs + ("BODY" to response.substringAfter("\r\n\r\n")))
         }
+    }
+
+    @Test fun `stop is safe while clients and events keep coming`() {
+        assertTrue(server.start())
+        val base = URL(server.location())
+        // Clients connecting while it stops, events after it stopped: nothing may throw.
+        val clients = (1..20).map { Thread { runCatching { Socket(base.host, base.port).use { it.getOutputStream().write("GET / HTTP/1.1\r\n\r\n".toByteArray()) } } } }
+        clients.forEach { it.start() }
+        server.stop()
+        server.stop()
+        server.notifyChanged()
+        clients.forEach { it.join() }
+        assertFalse(server.isRunning)
+        assertFalse(server.start())   // a stopped server is not restarted
     }
 
     @Test fun `description, control and eventing work over http`() {

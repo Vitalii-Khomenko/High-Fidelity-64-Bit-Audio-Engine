@@ -400,9 +400,7 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
     }
 
     override fun onDestroy() {
-        renderer?.stop()
-        renderer = null
-        runCatching { if (multicastLock?.isHeld == true) multicastLock?.release() }
+        stopRenderer()
         saveResumePoint()
         scope.cancel()
         try { unregisterReceiver(noisyReceiver) } catch (_: Exception) {}
@@ -780,6 +778,7 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
     private fun rendererName(): String = "HiFi Player (${Build.MODEL})"
 
     private var multicastLock: android.net.wifi.WifiManager.MulticastLock? = null
+    private var rendererStartJob: Job? = null
 
     /** A stable device id, so control points remember this renderer. */
     private fun rendererUdn(): String {
@@ -788,29 +787,41 @@ class PlaybackService : MediaBrowserServiceCompat(), PlayerCommands {
     }
 
     private fun startRenderer() {
-        if (renderer?.isRunning == true) return
+        if (renderer?.isRunning == true || rendererStartJob?.isActive == true) return
         val server = RendererServer(rendererHost, rendererName(), rendererUdn())
-        scope.launch {
+        rendererStartJob = scope.launch {
             val ok = withContext(Dispatchers.IO) { runCatching { server.start() }.getOrDefault(false) }
             if (ok && settings.renderer) {
                 renderer = server
                 // Some phones drop multicast (SSDP searches) without a lock.
-                multicastLock = (applicationContext.getSystemService(WIFI_SERVICE) as? android.net.wifi.WifiManager)
-                    ?.createMulticastLock("hifi-renderer")?.apply { setReferenceCounted(false); acquire() }
+                multicastLock = runCatching {
+                    (applicationContext.getSystemService(WIFI_SERVICE) as? android.net.wifi.WifiManager)
+                        ?.createMulticastLock("hifi-renderer")?.apply { setReferenceCounted(false); acquire() }
+                }.getOrNull()
             } else {
-                withContext(Dispatchers.IO) { server.stop() }
+                stopInBackground(server)
                 if (settings.renderer) _messages.tryEmit(getString(R.string.renderer_no_network))
             }
             publish()
+        }.also { job ->
+            // Switched off while starting: the started server must not stay up.
+            job.invokeOnCompletion { cause -> if (cause != null) stopInBackground(server) }
         }
     }
 
     private fun stopRenderer() {
+        rendererStartJob?.cancel()
+        rendererStartJob = null
         runCatching { if (multicastLock?.isHeld == true) multicastLock?.release() }
         multicastLock = null
         val server = renderer ?: return
         renderer = null
-        scope.launch(Dispatchers.IO) { server.stop() }
+        stopInBackground(server)
+    }
+
+    /** stop() sends a goodbye over the network: never on the main thread, and also after the scope is gone. */
+    private fun stopInBackground(server: RendererServer) {
+        Thread({ runCatching { server.stop() } }, "dlna-renderer-stop").start()
     }
 
     // ── Renderer host: called on the renderer's threads ─────────────────────
