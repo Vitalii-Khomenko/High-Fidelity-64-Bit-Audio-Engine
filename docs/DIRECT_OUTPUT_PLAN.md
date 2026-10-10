@@ -3,7 +3,8 @@
 Status: **phase 1 implemented in 0.16.0** (bit-perfect mixer attributes,
 integer output with dither, the path indicator), **phase 2 in 0.18.0** (own
 UAC1/UAC2 driver, PCM; DoP and hardware volume still to do). Both are verified
-on the host against simulated devices, not yet on real phones and DACs. This page records
+on the host against simulated devices; testing on real phones and DACs is under
+way (status in [TESTING.md](TESTING.md#on-real-devices)). This page records
 where the audio goes, why "bypassing Android" is not as simple as it sounds, and
 the order in which real bit-perfect output is built.
 
@@ -165,5 +166,5 @@ now and then), clock selectors other than their first input.
 1. Phase 1 (bit-perfect mixer attributes) with the honest path indicator.
 2. Integer output and dither (needed by both phases).
 3. Phase 2 (own USB driver), starting with UAC2 PCM, then UAC1, then DoP.
-   UAC2 and UAC1 PCM are done; next DoP and hardware volume, then real-device
-   testing (step 9).
+   UAC2 and UAC1 PCM are done and in testing on real devices (step 9); next DoP
+   and hardware volume.

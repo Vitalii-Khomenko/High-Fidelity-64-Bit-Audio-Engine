@@ -155,9 +155,28 @@ of the browse tree (`connectedDebugAndroidTest`). For the real head unit:
    seek from the car, voice "play <title> on HiFi Player", an unreadable file
    (error on the car screen), and phone-to-car hand-over while playing.
 
-## On a real device
+## On real devices
 
-Host tests cannot cover the audio HAL, Bluetooth or OEM power management.
+Testing on phones and USB DACs has started and continues with every release,
+alongside the host suites above (which cover the engine, the USB driver against a
+simulated DAC, and the app logic, but not the audio HAL, Bluetooth or OEM power
+management).
+
+### Status
+
+| Device | Confirmed | In progress |
+|---|---|---|
+| Samsung Galaxy A55 | Playback and the library (incl. *Folders*), the English interface with Russian file names and tags, the signal-path indicator (mixed output on the speaker), the DLNA renderer switching on and off (0.19.1), a USB DAC connected | Volume with the USB DAC after the decibel scale (0.19.2), *Open with* / *Share*, the own USB driver |
+| Xiaomi phone with a USB DAC | The DAC is recognised; the phone offers no bit-perfect mixer attributes, and the app says so instead of claiming bit-perfect | The own USB driver with this DAC |
+
+Still to cover: hours-long runs with the own driver (clock drift), several DACs
+(UAC1, two UAC2 vendors, hardware volume, native DSD), Bluetooth codecs, Android
+Auto, and a phone with working Android 14 bit-perfect output (e.g. a Pixel).
+Reports with phone model, Android version, DAC, file format and steps go into
+this table.
+
+### Checklist
+
 Before treating a build as stable, check:
 
 1. WAV, FLAC, MP3 (VBR without Xing), DSF and DFF, WavPack, APE, TTA, Ogg Vorbis, Opus, M4A (AAC and ALAC), an HE-AAC stream; the first and last seconds of short tracks.

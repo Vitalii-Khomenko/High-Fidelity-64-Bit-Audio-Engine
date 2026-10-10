@@ -4,7 +4,7 @@
 
 - **Shared-mode output** except for USB DACs: the *own USB driver* (any
   Android version) or *Bit-perfect USB* on Android 14+ where the phone supports
-  it; neither confirmed on real hardware yet.
+  it; both in testing on real phones and DACs ([TESTING.md](TESTING.md#on-real-devices)).
   Android ≤ 13, Bluetooth and the phone's own outputs go through the mixer,
   which applies the system volume and the phone's sound effects. The engine
   converts to the mixer's rate itself (64-bit), so the mixer does not resample. Phase 2 (an own USB Audio
@@ -34,15 +34,18 @@
   kills the process (`START_NOT_STICKY`); the queue and position are restored on
   the next start.
 - **Real-device coverage.** The engine is verified on the host (sanitizers,
-  simulated output and codecs). Behaviour with real HALs, MediaCodec
-  implementations, Bluetooth stacks and OEM power management must be confirmed
-  on phones (see [TESTING.md](TESTING.md)).
+  simulated output, codecs and a simulated USB DAC) and is being tested on
+  phones and USB DACs (Samsung Galaxy A55, a Xiaomi phone); what is confirmed and
+  what is still in progress is listed in [TESTING.md](TESTING.md#on-real-devices).
+  More HALs, MediaCodec implementations, Bluetooth stacks, DACs and OEM power
+  management are being added.
 
 ## Next steps
 
-1. Confirm phases 1 and 2 on real phones and DACs (rates on the DAC display,
-   loop-back bit-exactness, hours-long runs for clock drift) —
-   [DIRECT_OUTPUT_PLAN.md](DIRECT_OUTPUT_PLAN.md).
+1. Continue testing phases 1 and 2 on real phones and DACs (rates on the DAC
+   display, loop-back bit-exactness, hours-long runs for clock drift) —
+   [DIRECT_OUTPUT_PLAN.md](DIRECT_OUTPUT_PLAN.md), status in
+   [TESTING.md](TESTING.md#on-real-devices).
 2. Own driver: DoP for DSD, hardware volume, implicit feedback.
 3. CUE sheets embedded in FLAC; CUE and lyrics for MediaStore tracks.
 4. A higher-quality music time-stretcher (phase vocoder / WSOLA in double precision).

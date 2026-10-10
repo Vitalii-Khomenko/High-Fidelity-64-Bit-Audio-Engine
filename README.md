@@ -74,8 +74,11 @@ TSAN=1 bash tests/native/run.sh          # plus ThreadSanitizer on the player sc
 ```
 
 The native suite needs only a C/C++17 compiler (SoX, FLAC and LAME enable the
-encoded-file fixtures). See [docs/TESTING.md](docs/TESTING.md), including the
-checklist for real devices.
+encoded-file fixtures). See [docs/TESTING.md](docs/TESTING.md).
+
+The app is also being tested on real devices (Samsung Galaxy A55, a Xiaomi phone,
+USB DACs) with every release; what is confirmed and what is still in progress is
+in [docs/TESTING.md](docs/TESTING.md#on-real-devices).
 
 ## Documentation
 

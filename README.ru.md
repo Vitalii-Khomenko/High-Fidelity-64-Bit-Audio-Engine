@@ -76,8 +76,11 @@ TSAN=1 bash tests/native/run.sh          # плюс ThreadSanitizer для сц�
 ```
 
 Нативным тестам нужен только компилятор C/C++17 (SoX, FLAC и LAME включают
-тесты на настоящих файлах). См. [docs/TESTING.md](docs/TESTING.md), там же —
-чек-лист проверки на телефоне.
+тесты на настоящих файлах). См. [docs/TESTING.md](docs/TESTING.md).
+
+Приложение также проверяется на реальных устройствах (Samsung Galaxy A55, телефон
+Xiaomi, USB-ЦАП) с каждой версией; что уже подтверждено и что ещё в работе —
+в [docs/TESTING.md](docs/TESTING.md#on-real-devices) (на английском).
 
 ## Честные ограничения
 
