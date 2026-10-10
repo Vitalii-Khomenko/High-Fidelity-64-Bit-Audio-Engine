@@ -101,7 +101,15 @@ class RendererServer(
      * thread would kill the app).
      */
     private fun submit(task: () -> Unit): Boolean = try {
-        pool.execute(task)
+        pool.execute {
+            try {
+                task()
+            } catch (_: InterruptedException) {
+                // stop() interrupts the pool: the task just ends.
+            } catch (_: Exception) {
+                // A broken client or network must not take the app down.
+            }
+        }
         true
     } catch (_: RejectedExecutionException) {
         false
@@ -311,7 +319,11 @@ class RendererServer(
             val wait = if (round++ < 3) 2_000L else 600_000L
             var waited = 0L
             while (running.get() && waited < wait) {
-                Thread.sleep(500)
+                try {
+                    Thread.sleep(500)
+                } catch (_: InterruptedException) {
+                    return   // stop() interrupts the pool
+                }
                 waited += 500
             }
         }

@@ -25,8 +25,8 @@ android {
         applicationId = "com.aiproject.musicplayer"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1900
-        versionName = "0.19.0"
+        versionCode = 1910
+        versionName = "0.19.1"
         // The app is English only, also for the strings bundled by libraries.
         resourceConfigurations += listOf("en")
 

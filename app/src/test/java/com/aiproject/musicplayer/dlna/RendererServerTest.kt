@@ -56,6 +56,23 @@ class RendererServerTest {
         }
     }
 
+    @Test fun `stopping with discovery on kills no thread`() {
+        // Any exception escaping a server thread closes the app on Android.
+        val escaped = java.util.Collections.synchronizedList(mutableListOf<Throwable>())
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { _, e -> escaped.add(e) }
+        try {
+            val withDiscovery = RendererServer(host, "Test Renderer", "5678", InetAddress.getLoopbackAddress(), discovery = true)
+            assertTrue(withDiscovery.start())
+            Thread.sleep(300)   // the announce loop is asleep between rounds
+            withDiscovery.stop()
+            Thread.sleep(700)
+            assertEquals(emptyList<Throwable>(), escaped.toList())
+        } finally {
+            Thread.setDefaultUncaughtExceptionHandler(previous)
+        }
+    }
+
     @Test fun `stop is safe while clients and events keep coming`() {
         assertTrue(server.start())
         val base = URL(server.location())

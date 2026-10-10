@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.19.1 — 2026-10-10
+
+- **DLNA renderer: switching it off closed the app** (also when the app was closed with it on). Stopping interrupts the server's threads, and the SSDP announcement loop let the `InterruptedException` of its sleep escape, which ends the process on Android. The loop now ends quietly, and every server task is guarded so that no exception can leave a server thread. Found with a test that runs the renderer with discovery on (the earlier tests ran without it).
+
 ## 0.19.0 — 2026-10-10
 
 - **Library → Folders**: every indexed folder with the files directly in it, in file-name order (natural: "2" before "10"), whatever their artists and albums — for mixes, compilations and podcast folders. Path shown under the name, search by name or path, play / shuffle / add.
