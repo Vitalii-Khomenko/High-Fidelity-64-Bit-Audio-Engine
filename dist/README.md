@@ -7,7 +7,7 @@ This folder always holds exactly one APK: the current one.
 
 | | |
 |---|---|
-| Version | 0.15.0 (1500) |
-| SHA-256 | `d9100781c9a64bad2747f4303e270690254506c26218324ad1f47709d22ef165` |
+| Version | 0.16.0 (1600) |
+| SHA-256 | `79a444f1be0187f3b62a58eccd936ef1295c43b581342c72202fd4921b378e8b` |
 
 Install: `adb install -r dist/HiFi-Player-audit.apk`
